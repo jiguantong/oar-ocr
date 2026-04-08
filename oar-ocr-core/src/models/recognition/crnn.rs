@@ -96,17 +96,17 @@ impl CRNNModel {
             );
 
             // Normalize and copy to tensor with zero padding。
-            // 保持当前 oar-ocr 模型输入顺序，仅单独验证 max_img_w 接线对精度的影响。
+            // 保持 RGB 通道顺序。
             for y in 0..img_h {
                 for x in 0..resized_w {
                     let pixel = resized.get_pixel(x as u32, y as u32);
-                    let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
-                    let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
                     let r = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
+                    let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
+                    let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
 
-                    batch_tensor[[batch_idx, 0, y, x]] = b;
+                    batch_tensor[[batch_idx, 0, y, x]] = r;
                     batch_tensor[[batch_idx, 1, y, x]] = g;
-                    batch_tensor[[batch_idx, 2, y, x]] = r;
+                    batch_tensor[[batch_idx, 2, y, x]] = b;
                 }
             }
             // Rest of the tensor remains zero (zero-padding)
