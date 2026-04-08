@@ -749,15 +749,9 @@ impl OAROCR {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
         let batch_size = self.region_batch_size.unwrap_or(regions.len()).max(1);
 
         for chunk in regions.chunks(batch_size) {
-            let chunk_max_wh_ratio = chunk
-                .iter()
-                .map(|r| r.wh_ratio)
-                .fold(base_rec_ratio, |acc, r| acc.max(r));
-
             let rec_input = ImageTaskInput::new(chunk.iter().map(|r| r.image.clone()).collect());
 
             let rec = self
@@ -801,13 +795,23 @@ impl OAROCR {
 
                 let bbox = region.bbox.clone();
                 let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
+                    // `execute(rec_input, None)` 中的 `None` 是任务配置，不是识别宽高比。
+                    // CRNN 识别阶段会在 preprocess() 内根据当前 batch 图片重新计算实际 tensor 宽度；
+                    // 这里单独计算 batch 最大宽高比，仅用于把 CTC 列索引映射回字符框。
+                    let base_rec_ratio =
+                        DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
+                    let batch_word_box_max_wh_ratio = chunk
+                        .iter()
+                        .map(|r| r.wh_ratio)
+                        .fold(base_rec_ratio, |acc, r| acc.max(r));
+
                     Some(Self::ctc_word_boxes(
                         &bbox,
                         &text,
                         col_indices.as_slice(),
                         seq_len,
                         region.wh_ratio,
-                        chunk_max_wh_ratio,
+                        batch_word_box_max_wh_ratio,
                     ))
                 } else if self.return_word_box && !char_positions.is_empty() {
                     Some(Self::char_positions_to_word_boxes(
