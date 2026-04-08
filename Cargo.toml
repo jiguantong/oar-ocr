@@ -34,7 +34,7 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = []
 # ONNX Runtime execution provider features
 cuda = ["oar-ocr-core/cuda"]
 tensorrt = ["oar-ocr-core/tensorrt"]
@@ -42,9 +42,11 @@ directml = ["oar-ocr-core/directml"]
 coreml = ["oar-ocr-core/coreml"]
 webgpu = ["oar-ocr-core/webgpu"]
 openvino = ["oar-ocr-core/openvino"]
-# Auto-download ONNX Runtime binaries during build (enabled by default).
+# Runtime loading / packaging strategy
+load-dynamic = ["oar-ocr-core/load-dynamic"]
+copy-dylibs = ["oar-ocr-core/copy-dylibs"]
+# Auto-download ONNX Runtime binaries during build.
 # Set ORT_LIB_LOCATION to use a custom installation (skips download).
-# Use --no-default-features for offline/enterprise environments.
 download-binaries = ["oar-ocr-core/download-binaries"]
 
 [dependencies]

@@ -18,7 +18,7 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = []
 # ONNX Runtime execution provider features
 cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt"]
@@ -26,7 +26,10 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
-# Auto-download ONNX Runtime binaries during build (enabled by default).
+# Runtime loading / packaging strategy
+load-dynamic = ["ort/load-dynamic"]
+copy-dylibs = ["ort/copy-dylibs"]
+# Auto-download ONNX Runtime binaries during build.
 download-binaries = ["ort/download-binaries"]
 
 [dependencies]
@@ -39,7 +42,7 @@ regex = "1.11.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 toml = "1.0"
-ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "tls-native", "copy-dylibs" ] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "tls-native" ] }
 ndarray = "0.17"
 nalgebra = "0.34"
 rayon = "1.8"
