@@ -379,6 +379,7 @@ struct CroppedTextRegion {
     detection_index: usize,
     bbox: BoundingBox,
     image: image::RgbImage,
+    original_image: Option<image::RgbImage>,
     wh_ratio: f32,
     line_orientation_angle: Option<f32>,
 }
@@ -392,6 +393,13 @@ impl std::fmt::Debug for CroppedTextRegion {
                 "image",
                 &format_args!("RgbImage({}x{})", self.image.width(), self.image.height()),
             )
+            .field(
+                "original_image",
+                &self
+                    .original_image
+                    .as_ref()
+                    .map(|img| format!("RgbImage({}x{})", img.width(), img.height())),
+            )
             .field("wh_ratio", &self.wh_ratio)
             .field("line_orientation_angle", &self.line_orientation_angle)
             .finish()
@@ -399,6 +407,9 @@ impl std::fmt::Debug for CroppedTextRegion {
 }
 
 impl OAROCR {
+    const LINE_ORIENTATION_ROTATE_THRESHOLD: f32 = 0.9;
+    const LINE_ORIENTATION_ROLLBACK_THRESHOLD: f32 = 0.85;
+
     /// Predicts text from images using the configured OCR pipeline.
     ///
     /// This method orchestrates the execution of all configured tasks in the pipeline,
@@ -654,6 +665,7 @@ impl OAROCR {
                     .cloned()
                     .unwrap_or_else(|| BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)),
                 image: img,
+                original_image: None,
                 wh_ratio,
                 line_orientation_angle: None,
             });
@@ -688,16 +700,37 @@ impl OAROCR {
                 continue;
             };
 
-            // Convert class_id to angle (0=0°, 1=180°)
-            let angle = (top_class.class_id as f32) * 180.0;
+            let should_rotate = top_class.class_id == 1
+                && top_class.score >= Self::LINE_ORIENTATION_ROTATE_THRESHOLD;
+            // 仅在高置信度判定为 180 度时才旋转，避免误旋转把正常文本打坏。
+            let angle = if should_rotate { 180.0 } else { 0.0 };
             regions[idx].line_orientation_angle = Some(angle);
 
-            if top_class.class_id == 1 {
+            if should_rotate {
+                // 保留未旋转原图，供低分识别时回退重试。
+                regions[idx].original_image = Some(regions[idx].image.clone());
                 regions[idx].image = image::imageops::rotate180(&regions[idx].image);
             }
         }
 
         Ok(())
+    }
+
+    fn recognize_single_text_region(
+        &self,
+        region: &CroppedTextRegion,
+    ) -> Result<(String, f32, Vec<f32>, Vec<usize>, usize), OCRError> {
+        let rec_input = ImageTaskInput::new(vec![region.image.clone()]);
+        let rec = self
+            .pipeline
+            .text_recognition_adapter
+            .execute(rec_input, None)?;
+        let text = rec.texts.first().cloned().unwrap_or_default();
+        let score = *rec.scores.first().unwrap_or(&0.0);
+        let char_positions = rec.char_positions.first().cloned().unwrap_or_default();
+        let col_indices = rec.char_col_indices.first().cloned().unwrap_or_default();
+        let seq_len = *rec.sequence_lengths.first().unwrap_or(&0);
+        Ok((text, score, char_positions, col_indices, seq_len))
     }
 
     fn recognize_text_regions(
@@ -734,27 +767,44 @@ impl OAROCR {
 
             let n = rec.texts.len().min(chunk.len());
             for (i, region) in chunk.iter().take(n).enumerate() {
-                let text = rec.texts.get(i).map(String::as_str).unwrap_or("");
-                let score = *rec.scores.get(i).unwrap_or(&0.0);
+                let mut text = rec.texts.get(i).cloned().unwrap_or_default();
+                let mut score = *rec.scores.get(i).unwrap_or(&0.0);
+                let mut char_positions = rec.char_positions.get(i).cloned().unwrap_or_default();
+                let mut col_indices = rec.char_col_indices.get(i).cloned().unwrap_or_default();
+                let mut seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
 
-                let char_positions: &[f32] = rec
-                    .char_positions
-                    .get(i)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let col_indices: &[usize] = rec
-                    .char_col_indices
-                    .get(i)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
+                if score < Self::LINE_ORIENTATION_ROLLBACK_THRESHOLD
+                    && region.line_orientation_angle == Some(180.0)
+                    && region.original_image.is_some()
+                {
+                    let mut rollback_region = CroppedTextRegion {
+                        detection_index: region.detection_index,
+                        bbox: region.bbox.clone(),
+                        image: region.original_image.clone().unwrap_or_else(|| region.image.clone()),
+                        original_image: None,
+                        wh_ratio: region.wh_ratio,
+                        line_orientation_angle: Some(0.0),
+                    };
+
+                    let (rollback_text, rollback_score, rollback_char_positions, rollback_col_indices, rollback_seq_len) =
+                        self.recognize_single_text_region(&rollback_region)?;
+
+                    if rollback_score > score {
+                        text = rollback_text;
+                        score = rollback_score;
+                        char_positions = rollback_char_positions;
+                        col_indices = rollback_col_indices;
+                        seq_len = rollback_seq_len;
+                        rollback_region.image = region.image.clone();
+                    }
+                }
 
                 let bbox = region.bbox.clone();
                 let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
                     Some(Self::ctc_word_boxes(
                         &bbox,
-                        text,
-                        col_indices,
+                        &text,
+                        col_indices.as_slice(),
                         seq_len,
                         region.wh_ratio,
                         chunk_max_wh_ratio,
@@ -762,7 +812,7 @@ impl OAROCR {
                 } else if self.return_word_box && !char_positions.is_empty() {
                     Some(Self::char_positions_to_word_boxes(
                         &bbox,
-                        char_positions,
+                        char_positions.as_slice(),
                         text.chars().count(),
                     ))
                 } else {

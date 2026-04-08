@@ -44,8 +44,8 @@ impl TextLineOrientationAdapter {
     }
 
     /// Default input shape for text line orientation classification.
-    /// PP-LCNet text line orientation models expect 80x160 inputs.
-    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (80, 160);
+    /// 当前项目使用的 PP-OCR 文本行方向分类模型与旧链路一致，期望 48x192 输入。
+    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (48, 192);
 
     /// Class labels for text line orientation.
     pub fn labels() -> Vec<String> {
@@ -157,8 +157,8 @@ impl_adapter_builder! {
 
         // Build the PP-LCNet model
         let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(builder.input_shape);
-        // Align with standard model configuration:
-        // - Direct resize to 80x160 (no resize_short + crop)
+        // Align with PP-OCR text line orientation preprocessing:
+        // - Direct resize to 48x192 (no resize_short + crop)
         // - ImageNet mean/std in RGB order (handled by PPLCNetPreprocessConfig defaults)
         preprocess_config.resize_short = None;
 

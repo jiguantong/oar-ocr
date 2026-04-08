@@ -95,13 +95,11 @@ impl CRNNModel {
                 image::imageops::FilterType::Triangle,
             );
 
-            // Normalize and copy to tensor with zero padding
-            // Channel order: BGR, so we need to swap channels
-            // Normalization: (pixel / 255 - 0.5) / 0.5
+            // Normalize and copy to tensor with zero padding。
+            // 保持当前 oar-ocr 模型输入顺序，仅单独验证 max_img_w 接线对精度的影响。
             for y in 0..img_h {
                 for x in 0..resized_w {
                     let pixel = resized.get_pixel(x as u32, y as u32);
-                    // BGR order for PaddlePaddle models
                     let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
                     let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
                     let r = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
@@ -320,7 +318,11 @@ impl CRNNModelBuilder {
         };
 
         // Create resizer
-        let resizer = OCRResize::new(Some(self.preprocess_config.model_input_shape), None);
+        let resizer = OCRResize::with_max_width(
+            Some(self.preprocess_config.model_input_shape),
+            None,
+            self.preprocess_config.max_img_w,
+        );
 
         // Create CTC decoder
         let decoder = if let Some(character_dict) = self.character_dict {
