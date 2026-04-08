@@ -40,6 +40,15 @@ pub struct CRNNModel {
 }
 
 impl CRNNModel {
+    #[inline]
+    fn normalize_rgb_pixel(pixel: &image::Rgb<u8>) -> [f32; 3] {
+        [
+            (pixel[0] as f32 / 255.0 - 0.5) / 0.5,
+            (pixel[1] as f32 / 255.0 - 0.5) / 0.5,
+            (pixel[2] as f32 / 255.0 - 0.5) / 0.5,
+        ]
+    }
+
     /// Creates a new CRNN model.
     pub fn new(inference: OrtInfer, resizer: OCRResize, decoder: CTCLabelDecode) -> Self {
         Self {
@@ -100,9 +109,7 @@ impl CRNNModel {
             for y in 0..img_h {
                 for x in 0..resized_w {
                     let pixel = resized.get_pixel(x as u32, y as u32);
-                    let r = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
-                    let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
-                    let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
+                    let [r, g, b] = Self::normalize_rgb_pixel(pixel);
 
                     batch_tensor[[batch_idx, 0, y, x]] = r;
                     batch_tensor[[batch_idx, 1, y, x]] = g;
@@ -339,5 +346,34 @@ impl CRNNModelBuilder {
 impl Default for CRNNModelBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CRNNModel;
+
+    #[test]
+    fn normalize_rgb_pixel_keeps_rgb_channel_order() {
+        let pixel = image::Rgb([10, 20, 30]);
+        let normalized = CRNNModel::normalize_rgb_pixel(&pixel);
+
+        let expected_r = (10.0 / 255.0 - 0.5) / 0.5;
+        let expected_g = (20.0 / 255.0 - 0.5) / 0.5;
+        let expected_b = (30.0 / 255.0 - 0.5) / 0.5;
+
+        assert!((normalized[0] - expected_r).abs() < f32::EPSILON);
+        assert!((normalized[1] - expected_g).abs() < f32::EPSILON);
+        assert!((normalized[2] - expected_b).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalize_rgb_pixel_does_not_swap_red_and_blue() {
+        let pixel = image::Rgb([255, 0, 0]);
+        let normalized = CRNNModel::normalize_rgb_pixel(&pixel);
+
+        assert!((normalized[0] - 1.0).abs() < f32::EPSILON);
+        assert!((normalized[1] + 1.0).abs() < f32::EPSILON);
+        assert!((normalized[2] + 1.0).abs() < f32::EPSILON);
     }
 }
