@@ -404,4 +404,39 @@ impl PPLCNetModelBuilder {
             self.preprocess_config.resize_short,
         ))
     }
+
+    /// Like `build` but loads the ONNX model from in-memory bytes instead of a file path.
+    pub fn build_from_bytes(self, model_bytes: &[u8]) -> Result<PPLCNetModel, OCRError> {
+        let inference = if self.ort_config.is_some() {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
+                ort_session: self.ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_config_bytes(&common_config, model_bytes, None)?
+        } else {
+            OrtInfer::from_bytes(model_bytes, None)?
+        };
+
+        let mean = self.preprocess_config.normalize_mean.clone();
+        let std = self.preprocess_config.normalize_std.clone();
+        let normalizer = NormalizeImage::with_color_order(
+            Some(self.preprocess_config.normalize_scale),
+            Some(mean),
+            Some(std),
+            Some(self.preprocess_config.tensor_layout),
+            Some(crate::processors::types::ColorOrder::RGB),
+        )?;
+
+        let topk_processor = Topk::new(None);
+
+        Ok(PPLCNetModel::new(
+            inference,
+            normalizer,
+            topk_processor,
+            self.preprocess_config.input_shape,
+            self.preprocess_config.resize_filter,
+            self.preprocess_config.resize_short,
+        ))
+    }
 }

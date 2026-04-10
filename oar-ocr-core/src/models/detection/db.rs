@@ -324,6 +324,50 @@ impl DBModelBuilder {
 
         Ok(DBModel::new(inference, resizer, normalizer, postprocessor))
     }
+
+    /// Like `build` but loads the ONNX model from in-memory bytes instead of a file path.
+    pub fn build_from_bytes(self, model_bytes: &[u8]) -> Result<DBModel, OCRError> {
+        let inference = if self.ort_config.is_some() {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
+                ort_session: self.ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_config_bytes(&common_config, model_bytes, Some("x"))?
+        } else {
+            OrtInfer::from_bytes(model_bytes, Some("x"))?
+        };
+
+        let resizer = DetResizeForTest::new(
+            None,
+            None,
+            None,
+            self.preprocess_config.limit_side_len,
+            self.preprocess_config.limit_type,
+            self.preprocess_config.resize_long,
+            self.preprocess_config.max_side_limit,
+        );
+
+        let normalizer = NormalizeImage::with_color_order(
+            Some(1.0 / 255.0),
+            Some(vec![0.485, 0.456, 0.406]),
+            Some(vec![0.229, 0.224, 0.225]),
+            Some(TensorLayout::CHW),
+            Some(crate::processors::types::ColorOrder::BGR),
+        )?;
+
+        let postprocessor = DBPostProcess::new(
+            Some(self.postprocess_config.score_threshold),
+            Some(self.postprocess_config.box_threshold),
+            Some(self.postprocess_config.max_candidates),
+            Some(self.postprocess_config.unclip_ratio),
+            Some(self.postprocess_config.use_dilation),
+            Some(self.postprocess_config.score_mode),
+            Some(self.postprocess_config.box_type),
+        );
+
+        Ok(DBModel::new(inference, resizer, normalizer, postprocessor))
+    }
 }
 
 impl Default for DBModelBuilder {

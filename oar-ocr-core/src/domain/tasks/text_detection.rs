@@ -30,7 +30,7 @@ impl Detection {
 /// Configuration for text detection task.
 ///
 /// Default values are aligned with PP-StructureV3.
-#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ConfigValidator)]
 pub struct TextDetectionConfig {
     /// Score threshold for detection (default: 0.3)
     #[validate(range(min = 0.0, max = 1.0))]

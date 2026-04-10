@@ -341,6 +341,33 @@ impl CRNNModelBuilder {
 
         Ok(CRNNModel::new(inference, resizer, decoder))
     }
+
+    /// Like `build` but loads the ONNX model from in-memory bytes instead of a file path.
+    pub fn build_from_bytes(self, model_bytes: &[u8]) -> Result<CRNNModel, OCRError> {
+        let inference = if self.ort_config.is_some() {
+            let common = crate::core::config::ModelInferenceConfig {
+                ort_session: self.ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_config_bytes(&common, model_bytes, None)?
+        } else {
+            OrtInfer::from_bytes(model_bytes, None)?
+        };
+
+        let resizer = OCRResize::with_max_width(
+            Some(self.preprocess_config.model_input_shape),
+            None,
+            self.preprocess_config.max_img_w,
+        );
+
+        let decoder = if let Some(character_dict) = self.character_dict {
+            CTCLabelDecode::from_string_list(Some(&character_dict), true, false)
+        } else {
+            CTCLabelDecode::new(None, true)
+        };
+
+        Ok(CRNNModel::new(inference, resizer, decoder))
+    }
 }
 
 impl Default for CRNNModelBuilder {

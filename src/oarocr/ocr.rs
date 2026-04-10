@@ -112,6 +112,41 @@ impl OAROCRBuilder {
         }
     }
 
+    /// Creates a new OCR builder for in-memory model loading via [`build_from_bytes`].
+    ///
+    /// Unlike [`new`], this constructor does not require model file paths — all models are
+    /// supplied as byte slices when [`build_from_bytes`] is called. Using [`new`] with dummy
+    /// empty paths and then calling [`build_from_bytes`] is equivalent but misleading;
+    /// prefer this constructor when loading from memory.
+    ///
+    /// # Warning
+    ///
+    /// This builder **must** be consumed by [`build_from_bytes`]. Calling [`build`] on a
+    /// builder created with `new_for_bytes` will attempt to read from empty paths and fail
+    /// with an I/O error. There is no compile-time enforcement of this constraint; it is a
+    /// caller responsibility.
+    ///
+    /// [`new`]: OAROCRBuilder::new
+    /// [`build`]: OAROCRBuilder::build
+    /// [`build_from_bytes`]: OAROCRBuilder::build_from_bytes
+    pub fn new_for_bytes() -> Self {
+        Self {
+            text_detection_model: PathBuf::new(),
+            text_recognition_model: PathBuf::new(),
+            character_dict_path: PathBuf::new(),
+            document_orientation_model: None,
+            text_line_orientation_model: None,
+            document_rectification_model: None,
+            ort_session_config: None,
+            text_detection_config: None,
+            text_recognition_config: None,
+            image_batch_size: None,
+            region_batch_size: None,
+            text_type: None,
+            return_word_box: false,
+        }
+    }
+
     /// Sets the ONNX Runtime session configuration.
     ///
     /// This configuration will be applied to all models in the pipeline.
@@ -251,63 +286,8 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.with_ort_config(ort_config.clone());
         }
 
-        // Align text detection defaults with OCR pipeline.
-        // Defaults depend on text_type:
-        // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
-        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
-        // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
-        let mut effective_det_cfg = self.text_detection_config.clone().unwrap_or_default();
-        let has_explicit_det_cfg = self.text_detection_config.is_some();
-        if !has_explicit_det_cfg {
-            match self.text_type.as_deref().unwrap_or("general") {
-                "table" => {
-                    effective_det_cfg.score_threshold = 0.3;
-                    effective_det_cfg.box_threshold = 0.4;
-                    effective_det_cfg.unclip_ratio = 2.0;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                "seal" => {
-                    effective_det_cfg.score_threshold = 0.2;
-                    effective_det_cfg.box_threshold = 0.6;
-                    effective_det_cfg.unclip_ratio = 0.5;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(736);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                _ => {
-                    effective_det_cfg.score_threshold = 0.3;
-                    effective_det_cfg.box_threshold = 0.6;
-                    effective_det_cfg.unclip_ratio = 2.0;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-            }
-        }
-
-        detection_builder = detection_builder.with_config(effective_det_cfg);
-
-        // Pass text_type to detection adapter for proper preprocessing configuration
+        detection_builder =
+            detection_builder.with_config(self.effective_text_detection_config());
         if let Some(ref text_type) = self.text_type {
             detection_builder = detection_builder.text_type(text_type.clone());
         }
@@ -354,6 +334,139 @@ impl OAROCRBuilder {
             image_batch_size: self.image_batch_size,
             region_batch_size: self.region_batch_size,
         })
+    }
+
+    /// Builds the OCR runtime from in-memory model bytes — no disk I/O for model loading.
+    ///
+    /// # Arguments
+    /// * `det_bytes`  — Detection model (ONNX) as bytes
+    /// * `rec_bytes`  — Recognition model (ONNX) as bytes
+    /// * `char_lines` — Character dictionary, one entry per line (pre-parsed)
+    /// * `cls_bytes`  — Optional angle-classification model (ONNX) as bytes
+    pub fn build_from_bytes(
+        self,
+        det_bytes: &[u8],
+        rec_bytes: &[u8],
+        char_lines: Vec<String>,
+        cls_bytes: Option<&[u8]>,
+    ) -> Result<OAROCR, OCRError> {
+        // Guard: these two adapters only support file-path loading for now.
+        // If configured and build_from_bytes is called, they would be silently dropped —
+        // fail fast instead. To use them, switch to build() or remove the conflicting call.
+        if self.document_rectification_model.is_some() {
+            return Err(OCRError::InvalidInput {
+                message: "document_rectification_model is configured but build_from_bytes \
+                          does not support in-memory loading for the rectification adapter. \
+                          Use build() for file-based loading, or remove the \
+                          with_document_image_rectification() call."
+                    .to_string(),
+            });
+        }
+        if self.document_orientation_model.is_some() {
+            return Err(OCRError::InvalidInput {
+                message: "document_orientation_model is configured but build_from_bytes \
+                          does not support in-memory loading for the document orientation adapter. \
+                          Use build() for file-based loading, or remove the \
+                          with_document_image_orientation_classification() call."
+                    .to_string(),
+            });
+        }
+
+        // Detection adapter
+        let mut detection_builder = TextDetectionAdapterBuilder::new();
+        if let Some(ref ort_config) = self.ort_session_config {
+            detection_builder = detection_builder.with_ort_config(ort_config.clone());
+        }
+        detection_builder =
+            detection_builder.with_config(self.effective_text_detection_config());
+        if let Some(ref text_type) = self.text_type {
+            detection_builder = detection_builder.text_type(text_type.clone());
+        }
+        let text_detection_adapter = detection_builder.build_from_bytes(det_bytes)?;
+
+        // Orientation (cls) adapter — optional
+        let text_line_orientation_adapter = if let Some(cls) = cls_bytes {
+            let mut cls_builder = TextLineOrientationAdapterBuilder::new();
+            if let Some(ref ort_config) = self.ort_session_config {
+                cls_builder = cls_builder.with_ort_config(ort_config.clone());
+            }
+            Some(cls_builder.build_from_bytes(cls)?)
+        } else {
+            None
+        };
+
+        // Recognition adapter
+        let mut recognition_builder = TextRecognitionAdapterBuilder::new()
+            .character_dict(char_lines)
+            .return_word_box(self.return_word_box);
+        if let Some(ref ort_config) = self.ort_session_config {
+            recognition_builder = recognition_builder.with_ort_config(ort_config.clone());
+        }
+        if let Some(ref rec_config) = self.text_recognition_config {
+            recognition_builder = recognition_builder.with_config(rec_config.clone());
+        }
+        let text_recognition_adapter = recognition_builder.build_from_bytes(rec_bytes)?;
+
+        let pipeline = OCRPipeline {
+            rectification_adapter: None,
+            document_orientation_adapter: None,
+            text_detection_adapter,
+            text_line_orientation_adapter,
+            text_recognition_adapter,
+        };
+
+        Ok(OAROCR {
+            pipeline,
+            text_type: self.text_type,
+            return_word_box: self.return_word_box,
+            image_batch_size: self.image_batch_size,
+            region_batch_size: self.region_batch_size,
+        })
+    }
+
+    /// Returns the effective [`TextDetectionConfig`] for this builder, applying text-type
+    /// specific defaults when no explicit config was provided.
+    ///
+    /// Shared by [`build`][OAROCRBuilder::build] and
+    /// [`build_from_bytes`][OAROCRBuilder::build_from_bytes] (including the
+    /// [`new_for_bytes`][OAROCRBuilder::new_for_bytes] path) so that detection defaults
+    /// stay in sync between both construction paths.
+    fn effective_text_detection_config(&self) -> TextDetectionConfig {
+        let mut cfg = self.text_detection_config.clone().unwrap_or_default();
+        if self.text_detection_config.is_some() {
+            return cfg;
+        }
+        match self.text_type.as_deref().unwrap_or("general") {
+            "table" => {
+                cfg.score_threshold = 0.3;
+                cfg.box_threshold = 0.4;
+                cfg.unclip_ratio = 2.0;
+                cfg.limit_side_len.get_or_insert(960);
+                cfg.limit_type
+                    .get_or_insert(crate::processors::LimitType::Max);
+                cfg.max_side_len.get_or_insert(4000);
+            }
+            "seal" => {
+                cfg.score_threshold = 0.2;
+                cfg.box_threshold = 0.6;
+                cfg.unclip_ratio = 0.5;
+                cfg.limit_side_len.get_or_insert(736);
+                cfg.limit_type
+                    .get_or_insert(crate::processors::LimitType::Min);
+                cfg.max_side_len.get_or_insert(4000);
+            }
+            _ => {
+                // "general" and all other text types
+                cfg.score_threshold = 0.3;
+                cfg.box_threshold = 0.6;
+                cfg.unclip_ratio = 2.0;
+                cfg.limit_side_len.get_or_insert(960);
+                cfg.limit_type
+                    .get_or_insert(crate::processors::LimitType::Max);
+                cfg.max_side_len.get_or_insert(4000);
+            }
+        }
+        cfg
     }
 }
 
@@ -1028,6 +1141,53 @@ impl OAROCR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_oarocr_builder_new_for_bytes() {
+        let builder = OAROCRBuilder::new_for_bytes();
+        // Paths are empty — callers must use build_from_bytes, not build()
+        assert_eq!(builder.text_detection_model, PathBuf::new());
+        assert_eq!(builder.text_recognition_model, PathBuf::new());
+        assert_eq!(builder.character_dict_path, PathBuf::new());
+        // Optional adapters that require file paths must not be pre-set
+        assert!(builder.document_orientation_model.is_none());
+        assert!(builder.document_rectification_model.is_none());
+        assert!(builder.text_line_orientation_model.is_none());
+    }
+
+    #[test]
+    fn test_effective_text_detection_config_explicit_wins() {
+        let explicit = TextDetectionConfig {
+            score_threshold: 0.9,
+            box_threshold: 0.9,
+            unclip_ratio: 1.0,
+            max_candidates: 500,
+            limit_side_len: Some(512),
+            limit_type: None,
+            max_side_len: None,
+        };
+        let builder = OAROCRBuilder::new_for_bytes().text_detection_config(explicit.clone());
+        // Explicit config must pass through unchanged — no default overrides applied.
+        assert_eq!(builder.effective_text_detection_config(), explicit);
+    }
+
+    #[test]
+    fn test_effective_text_detection_config_defaults_by_type() {
+        let general = OAROCRBuilder::new_for_bytes()
+            .effective_text_detection_config();
+        assert_eq!(general.limit_side_len, Some(960));
+
+        let seal = OAROCRBuilder::new_for_bytes()
+            .text_type("seal")
+            .effective_text_detection_config();
+        assert_eq!(seal.limit_side_len, Some(736));
+        assert_eq!(seal.score_threshold, 0.2);
+
+        let table = OAROCRBuilder::new_for_bytes()
+            .text_type("table")
+            .effective_text_detection_config();
+        assert_eq!(table.box_threshold, 0.4);
+    }
 
     #[test]
     fn test_oarocr_builder_new() {

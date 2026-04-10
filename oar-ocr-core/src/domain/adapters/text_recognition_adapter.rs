@@ -189,3 +189,33 @@ impl_adapter_builder! {
         })
     },
 }
+
+impl TextRecognitionAdapterBuilder {
+    /// Like `build` but loads the ONNX model from in-memory bytes.
+    pub fn build_from_bytes(
+        self,
+        model_bytes: &[u8],
+    ) -> Result<TextRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError { message: err.to_string() })?;
+
+        let mut model_builder =
+            CRNNModelBuilder::new().preprocess_config(self.preprocess_config);
+
+        if let Some(character_dict) = self.character_dict {
+            model_builder = model_builder.character_dict(character_dict);
+        }
+
+        let model = apply_ort_config!(model_builder, ort_config).build_from_bytes(model_bytes)?;
+
+        let info = Self::base_adapter_info();
+        Ok(TextRecognitionAdapter {
+            model,
+            info,
+            config: task_config,
+            return_word_box: self.return_word_box,
+        })
+    }
+}
