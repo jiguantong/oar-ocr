@@ -180,3 +180,57 @@ impl_adapter_builder! {
         })
     },
 }
+
+impl TextDetectionAdapterBuilder {
+    /// Like `build` but loads the ONNX model from in-memory bytes.
+    pub fn build_from_bytes(
+        self,
+        model_bytes: &[u8],
+    ) -> Result<TextDetectionAdapter, OCRError> {
+        let (task_config, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError { message: err.to_string() })?;
+
+        let is_seal_text = self
+            .text_type
+            .as_ref()
+            .map(|t| t.to_lowercase() == "seal")
+            .unwrap_or(false);
+
+        let mut preprocess_config =
+            super::preprocessing::db_preprocess_for_text_type(self.text_type.as_deref());
+        if let Some(limit) = task_config.limit_side_len {
+            preprocess_config.limit_side_len = Some(limit);
+        }
+        if let Some(limit_type) = task_config.limit_type.clone() {
+            preprocess_config.limit_type = Some(limit_type);
+        }
+        if let Some(max_limit) = task_config.max_side_len {
+            preprocess_config.max_side_limit = Some(max_limit);
+        }
+
+        let box_type = if is_seal_text { BoxType::Poly } else { BoxType::Quad };
+
+        let postprocess_config = DBPostprocessConfig {
+            score_threshold: task_config.score_threshold,
+            box_threshold: task_config.box_threshold,
+            unclip_ratio: task_config.unclip_ratio,
+            max_candidates: task_config.max_candidates,
+            use_dilation: false,
+            score_mode: ScoreMode::Fast,
+            box_type,
+        };
+
+        let model = apply_ort_config!(
+            DBModelBuilder::new()
+                .preprocess_config(preprocess_config)
+                .postprocess_config(postprocess_config),
+            ort_config
+        )
+        .build_from_bytes(model_bytes)?;
+
+        let info = Self::base_adapter_info();
+        Ok(TextDetectionAdapter { model, info, config: task_config })
+    }
+}

@@ -40,6 +40,15 @@ pub struct CRNNModel {
 }
 
 impl CRNNModel {
+    #[inline]
+    fn normalize_rgb_pixel(pixel: &image::Rgb<u8>) -> [f32; 3] {
+        [
+            (pixel[0] as f32 / 255.0 - 0.5) / 0.5,
+            (pixel[1] as f32 / 255.0 - 0.5) / 0.5,
+            (pixel[2] as f32 / 255.0 - 0.5) / 0.5,
+        ]
+    }
+
     /// Creates a new CRNN model.
     pub fn new(inference: OrtInfer, resizer: OCRResize, decoder: CTCLabelDecode) -> Self {
         Self {
@@ -95,20 +104,16 @@ impl CRNNModel {
                 image::imageops::FilterType::Triangle,
             );
 
-            // Normalize and copy to tensor with zero padding
-            // Channel order: BGR, so we need to swap channels
-            // Normalization: (pixel / 255 - 0.5) / 0.5
+            // Normalize and copy to tensor with zero padding。
+            // 保持 RGB 通道顺序。
             for y in 0..img_h {
                 for x in 0..resized_w {
                     let pixel = resized.get_pixel(x as u32, y as u32);
-                    // BGR order for PaddlePaddle models
-                    let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
-                    let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
-                    let r = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
+                    let [r, g, b] = Self::normalize_rgb_pixel(pixel);
 
-                    batch_tensor[[batch_idx, 0, y, x]] = b;
+                    batch_tensor[[batch_idx, 0, y, x]] = r;
                     batch_tensor[[batch_idx, 1, y, x]] = g;
-                    batch_tensor[[batch_idx, 2, y, x]] = r;
+                    batch_tensor[[batch_idx, 2, y, x]] = b;
                 }
             }
             // Rest of the tensor remains zero (zero-padding)
@@ -320,7 +325,11 @@ impl CRNNModelBuilder {
         };
 
         // Create resizer
-        let resizer = OCRResize::new(Some(self.preprocess_config.model_input_shape), None);
+        let resizer = OCRResize::with_max_width(
+            Some(self.preprocess_config.model_input_shape),
+            None,
+            self.preprocess_config.max_img_w,
+        );
 
         // Create CTC decoder
         let decoder = if let Some(character_dict) = self.character_dict {
@@ -332,10 +341,66 @@ impl CRNNModelBuilder {
 
         Ok(CRNNModel::new(inference, resizer, decoder))
     }
+
+    /// Like `build` but loads the ONNX model from in-memory bytes instead of a file path.
+    pub fn build_from_bytes(self, model_bytes: &[u8]) -> Result<CRNNModel, OCRError> {
+        let inference = if self.ort_config.is_some() {
+            let common = crate::core::config::ModelInferenceConfig {
+                ort_session: self.ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_config_bytes(&common, model_bytes, None)?
+        } else {
+            OrtInfer::from_bytes(model_bytes, None)?
+        };
+
+        let resizer = OCRResize::with_max_width(
+            Some(self.preprocess_config.model_input_shape),
+            None,
+            self.preprocess_config.max_img_w,
+        );
+
+        let decoder = if let Some(character_dict) = self.character_dict {
+            CTCLabelDecode::from_string_list(Some(&character_dict), true, false)
+        } else {
+            CTCLabelDecode::new(None, true)
+        };
+
+        Ok(CRNNModel::new(inference, resizer, decoder))
+    }
 }
 
 impl Default for CRNNModelBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CRNNModel;
+
+    #[test]
+    fn normalize_rgb_pixel_keeps_rgb_channel_order() {
+        let pixel = image::Rgb([10, 20, 30]);
+        let normalized = CRNNModel::normalize_rgb_pixel(&pixel);
+
+        let expected_r = (10.0 / 255.0 - 0.5) / 0.5;
+        let expected_g = (20.0 / 255.0 - 0.5) / 0.5;
+        let expected_b = (30.0 / 255.0 - 0.5) / 0.5;
+
+        assert!((normalized[0] - expected_r).abs() < f32::EPSILON);
+        assert!((normalized[1] - expected_g).abs() < f32::EPSILON);
+        assert!((normalized[2] - expected_b).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalize_rgb_pixel_does_not_swap_red_and_blue() {
+        let pixel = image::Rgb([255, 0, 0]);
+        let normalized = CRNNModel::normalize_rgb_pixel(&pixel);
+
+        assert!((normalized[0] - 1.0).abs() < f32::EPSILON);
+        assert!((normalized[1] + 1.0).abs() < f32::EPSILON);
+        assert!((normalized[2] + 1.0).abs() < f32::EPSILON);
     }
 }

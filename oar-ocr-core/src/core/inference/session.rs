@@ -33,3 +33,29 @@ where
     })?;
     Ok(session)
 }
+
+/// Loads a session from an in-memory model byte slice (no file I/O).
+pub(crate) fn load_session_from_bytes(model_bytes: &[u8]) -> Result<Session, OCRError> {
+    load_session_from_bytes_with(
+        model_bytes,
+        |builder| Ok(builder.with_log_level(LogLevel::Error)?),
+    )
+}
+
+/// Builds a session from bytes using a caller-provided builder configuration.
+pub(crate) fn load_session_from_bytes_with<F>(
+    model_bytes: &[u8],
+    configure_builder: F,
+) -> Result<Session, OCRError>
+where
+    F: FnOnce(SessionBuilder) -> Result<SessionBuilder, ort::Error>,
+{
+    let builder = Session::builder()?;
+    let mut builder = configure_builder(builder)?;
+    let session = builder
+        .commit_from_memory(model_bytes)
+        .map_err(|e| OCRError::InvalidInput {
+            message: format!("failed to create ONNX session from memory: {e}"),
+        })?;
+    Ok(session)
+}

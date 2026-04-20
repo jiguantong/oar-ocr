@@ -44,8 +44,8 @@ impl TextLineOrientationAdapter {
     }
 
     /// Default input shape for text line orientation classification.
-    /// PP-LCNet text line orientation models expect 80x160 inputs.
-    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (80, 160);
+    /// 当前项目使用的 PP-OCR 文本行方向分类模型与旧链路一致，期望 48x192 输入。
+    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (48, 192);
 
     /// Class labels for text line orientation.
     pub fn labels() -> Vec<String> {
@@ -157,8 +157,8 @@ impl_adapter_builder! {
 
         // Build the PP-LCNet model
         let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(builder.input_shape);
-        // Align with standard model configuration:
-        // - Direct resize to 80x160 (no resize_short + crop)
+        // Align with PP-OCR text line orientation preprocessing:
+        // - Direct resize to 48x192 (no resize_short + crop)
         // - ImageNet mean/std in RGB order (handled by PPLCNetPreprocessConfig defaults)
         preprocess_config.resize_short = None;
 
@@ -187,6 +187,41 @@ impl_adapter_builder! {
             postprocess_config,
         ))
     },
+}
+
+impl TextLineOrientationAdapterBuilder {
+    /// Like `build` but loads the ONNX model from in-memory bytes.
+    pub fn build_from_bytes(
+        self,
+        model_bytes: &[u8],
+    ) -> Result<TextLineOrientationAdapter, OCRError> {
+        let (task_config, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError { message: err.to_string() })?;
+
+        let mut preprocess_config =
+            super::preprocessing::pp_lcnet_preprocess(self.input_shape);
+        preprocess_config.resize_short = None;
+
+        let model = apply_ort_config!(
+            PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
+            ort_config
+        )
+        .build_from_bytes(model_bytes)?;
+
+        let postprocess_config = PPLCNetPostprocessConfig {
+            labels: TextLineOrientationAdapter::labels(),
+            topk: 1,
+        };
+
+        let mut info = Self::base_adapter_info();
+        if let Some(model_name) = self.model_name_override {
+            info.model_name = model_name;
+        }
+
+        Ok(TextLineOrientationAdapter::new(model, info, task_config, postprocess_config))
+    }
 }
 
 #[cfg(test)]
