@@ -192,7 +192,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cudnn_conv_algo_search: None,
                 cudnn_conv_use_max_workspace: None,
             },
-            OrtExecutionProvider::CPU,  // Fallback
+            OrtExecutionProvider::CPU {
+                arena_allocator: None,
+            },  // Fallback
         ]);
 
     // Build OCR pipeline with CUDA
@@ -249,7 +251,9 @@ let ort_config = OrtSessionConfig::new()
             cudnn_conv_algo_search: None,
             cudnn_conv_use_max_workspace: None,
         },
-        OrtExecutionProvider::CPU,
+        OrtExecutionProvider::CPU {
+            arena_allocator: None,
+        },
     ]);
 ```
 
@@ -608,7 +612,9 @@ Control ONNX Runtime session behavior:
 use oar_ocr::core::config::{OrtSessionConfig, OrtExecutionProvider};
 
 let config = OrtSessionConfig::new()
-    .with_execution_providers(vec![OrtExecutionProvider::CPU])
+    .with_execution_providers(vec![OrtExecutionProvider::CPU {
+        arena_allocator: None,
+    }])
     .with_intra_threads(4)
     .with_inter_threads(2);
 ```

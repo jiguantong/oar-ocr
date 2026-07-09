@@ -29,6 +29,10 @@ webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
 # Auto-download ONNX Runtime binaries during build (enabled by default).
 download-binaries = ["ort/download-binaries", "ort/tls-native"]
+# Load ONNX Runtime dynamically at runtime.
+load-dynamic = ["ort/load-dynamic"]
+# Copy ONNX Runtime dynamic libraries into Cargo build outputs.
+copy-dylibs = ["ort/copy-dylibs"]
 # Auto-download registered OCR model files at runtime from ModelScope into the
 # on-disk cache (`$OAR_HOME` or `~/.oar`), verifying each file's SHA-256.
 auto-download = ["dep:ureq", "dep:sha2", "dep:dirs"]
@@ -46,7 +50,7 @@ multiversion = { version = "0.8", optional = true }
 nalgebra = "0.35"
 ndarray = "0.17"
 oar-ocr-derive.workspace = true
-ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "api-24" ] }
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true

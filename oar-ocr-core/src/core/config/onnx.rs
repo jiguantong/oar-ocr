@@ -25,11 +25,16 @@ pub enum OrtGraphOptimizationLevel {
 ///
 /// This enum represents the different execution providers that can be used
 /// with ONNX Runtime for model inference.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OrtExecutionProvider {
     /// CPU execution provider (always available)
-    #[default]
-    CPU,
+    CPU {
+        /// Whether to enable the CPU arena allocator.
+        ///
+        /// `Some(false)` is useful for desktop single-request workloads that prefer
+        /// lower steady-state memory over peak throughput.
+        arena_allocator: Option<bool>,
+    },
     /// NVIDIA CUDA execution provider
     CUDA {
         /// CUDA device ID (default: 0)
@@ -89,6 +94,14 @@ pub enum OrtExecutionProvider {
     },
     /// WebGPU execution provider
     WebGPU,
+}
+
+impl Default for OrtExecutionProvider {
+    fn default() -> Self {
+        Self::CPU {
+            arena_allocator: None,
+        }
+    }
 }
 
 /// Configuration for ONNX Runtime sessions.
@@ -163,6 +176,11 @@ impl OrtSessionConfig {
         self
     }
 
+    /// Adds a CPU execution provider with optional arena allocator control.
+    pub fn add_cpu_execution_provider(self, arena_allocator: Option<bool>) -> Self {
+        self.add_execution_provider(OrtExecutionProvider::CPU { arena_allocator })
+    }
+
     /// Enables or disables memory pattern optimization.
     pub fn with_memory_pattern(mut self, enable: bool) -> Self {
         self.enable_mem_pattern = Some(enable);
@@ -216,7 +234,7 @@ impl OrtSessionConfig {
     pub fn get_execution_providers(&self) -> Vec<OrtExecutionProvider> {
         self.execution_providers
             .clone()
-            .unwrap_or_else(|| vec![OrtExecutionProvider::CPU])
+            .unwrap_or_else(|| vec![OrtExecutionProvider::default()])
     }
 }
 
@@ -231,7 +249,7 @@ mod tests {
             .with_inter_threads(2)
             .with_optimization_level(OrtGraphOptimizationLevel::Level2)
             .with_memory_pattern(true)
-            .add_execution_provider(OrtExecutionProvider::CPU);
+            .add_cpu_execution_provider(Some(false));
 
         assert_eq!(config.intra_threads, Some(4));
         assert_eq!(config.inter_threads, Some(2));
@@ -241,6 +259,12 @@ mod tests {
         ));
         assert_eq!(config.enable_mem_pattern, Some(true));
         assert!(config.execution_providers.is_some());
+        assert!(matches!(
+            config.execution_providers.as_ref().and_then(|v| v.first()),
+            Some(OrtExecutionProvider::CPU {
+                arena_allocator: Some(false)
+            })
+        ));
     }
 
     #[test]

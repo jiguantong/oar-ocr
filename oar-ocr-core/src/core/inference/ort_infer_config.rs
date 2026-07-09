@@ -73,9 +73,12 @@ impl OrtInfer {
 
         for ep in eps {
             match ep {
-                EP::CPU => {
-                    providers
-                        .push(ort::execution_providers::CPUExecutionProvider::default().build());
+                EP::CPU { arena_allocator } => {
+                    let mut cpu_provider = ort::execution_providers::CPUExecutionProvider::default();
+                    if let Some(enable) = arena_allocator {
+                        cpu_provider = cpu_provider.with_arena_allocator(*enable);
+                    }
+                    providers.push(cpu_provider.build());
                 }
                 #[cfg(feature = "cuda")]
                 EP::CUDA {
