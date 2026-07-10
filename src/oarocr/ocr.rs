@@ -19,7 +19,7 @@ use oar_ocr_core::domain::adapters::{
     UVDocRectifierAdapterBuilder,
 };
 use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
-use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::processors::{BoundingBox, Point};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -436,6 +436,127 @@ struct CroppedTextRegion {
     line_orientation_angle: Option<f32>,
 }
 
+struct RecognitionBoxGeometry {
+    ordered_points: [Point; 4],
+    crop_width: f32,
+    crop_height: f32,
+    recognition_width: f32,
+    recognition_height: f32,
+    rotated_vertical_crop: bool,
+    line_rotated_180: bool,
+}
+
+impl RecognitionBoxGeometry {
+    fn from_line_bbox(line_bbox: &BoundingBox, line_orientation_angle: Option<f32>) -> Self {
+        let ordered_points = Self::ordered_crop_points(line_bbox);
+        let raw_crop_width = point_distance(ordered_points[0], ordered_points[1])
+            .max(point_distance(ordered_points[2], ordered_points[3]))
+            .max(f32::EPSILON);
+        let raw_crop_height = point_distance(ordered_points[0], ordered_points[3])
+            .max(point_distance(ordered_points[1], ordered_points[2]))
+            .max(f32::EPSILON);
+        // 必须和 get_rotate_crop_image 的裁剪尺寸保持一致：先 round 成目标图尺寸，
+        // 再判断是否因高宽比 >= 1.5 而 rotate270。否则接近阈值的框会反投影到错误方向。
+        let crop_width = raw_crop_width.round().max(1.0);
+        let crop_height = raw_crop_height.round().max(1.0);
+        let rotated_vertical_crop = crop_height >= crop_width * 1.5;
+        let (recognition_width, recognition_height) = if rotated_vertical_crop {
+            (crop_height, crop_width)
+        } else {
+            (crop_width, crop_height)
+        };
+
+        Self {
+            ordered_points,
+            crop_width,
+            crop_height,
+            recognition_width,
+            recognition_height,
+            rotated_vertical_crop,
+            line_rotated_180: line_orientation_angle
+                .map(|angle| (angle - 180.0).abs() < 1.0)
+                .unwrap_or(false),
+        }
+    }
+
+    fn ordered_crop_points(line_bbox: &BoundingBox) -> [Point; 4] {
+        if line_bbox.points.len() == 4 {
+            let mut sorted = [
+                line_bbox.points[0],
+                line_bbox.points[1],
+                line_bbox.points[2],
+                line_bbox.points[3],
+            ];
+            sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+            let (mut index_a, mut index_d) = (0usize, 1usize);
+            if sorted[1].y < sorted[0].y {
+                index_a = 1;
+                index_d = 0;
+            }
+
+            let (mut index_b, mut index_c) = (2usize, 3usize);
+            if sorted[3].y < sorted[2].y {
+                index_b = 3;
+                index_c = 2;
+            }
+
+            return [
+                sorted[index_a],
+                sorted[index_b],
+                sorted[index_c],
+                sorted[index_d],
+            ];
+        }
+
+        [
+            Point::new(line_bbox.x_min(), line_bbox.y_min()),
+            Point::new(line_bbox.x_max(), line_bbox.y_min()),
+            Point::new(line_bbox.x_max(), line_bbox.y_max()),
+            Point::new(line_bbox.x_min(), line_bbox.y_max()),
+        ]
+    }
+
+    fn recognition_rect_to_bbox(&self, x_min: f32, x_max: f32) -> BoundingBox {
+        // 字符位置来自识别图的 x 轴；这里按裁剪和行方向旋转的逆变换映射回检测框。
+        BoundingBox::new(vec![
+            self.recognition_point_to_image(x_min, 0.0),
+            self.recognition_point_to_image(x_max, 0.0),
+            self.recognition_point_to_image(x_max, self.recognition_height),
+            self.recognition_point_to_image(x_min, self.recognition_height),
+        ])
+    }
+
+    fn recognition_point_to_image(&self, x: f32, y: f32) -> Point {
+        let (mut rx, mut ry) = (x, y);
+        if self.line_rotated_180 {
+            rx = self.recognition_width - rx;
+            ry = self.recognition_height - ry;
+        }
+
+        let (crop_x, crop_y) = if self.rotated_vertical_crop {
+            (self.crop_width - ry, rx)
+        } else {
+            (rx, ry)
+        };
+
+        let u = (crop_x / self.crop_width).clamp(0.0, 1.0);
+        let v = (crop_y / self.crop_height).clamp(0.0, 1.0);
+
+        let top = lerp_point(self.ordered_points[0], self.ordered_points[1], u);
+        let bottom = lerp_point(self.ordered_points[3], self.ordered_points[2], u);
+        lerp_point(top, bottom, v)
+    }
+}
+
+fn point_distance(a: Point, b: Point) -> f32 {
+    (a.x - b.x).hypot(a.y - b.y)
+}
+
+fn lerp_point(a: Point, b: Point, t: f32) -> Point {
+    Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
 impl std::fmt::Debug for CroppedTextRegion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CroppedTextRegion")
@@ -839,6 +960,7 @@ impl OAROCR {
                 let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
                     Some(Self::ctc_word_boxes(
                         &bbox,
+                        region.line_orientation_angle,
                         text,
                         col_indices,
                         seq_len,
@@ -848,6 +970,7 @@ impl OAROCR {
                 } else if self.return_word_box && !char_positions.is_empty() {
                     Some(Self::char_positions_to_word_boxes(
                         &bbox,
+                        region.line_orientation_angle,
                         char_positions,
                         text.chars().count(),
                     ))
@@ -927,6 +1050,7 @@ impl OAROCR {
     /// A vector of bounding boxes, one for each character
     fn ctc_word_boxes(
         line_bbox: &BoundingBox,
+        line_orientation_angle: Option<f32>,
         text: &str,
         col_indices: &[usize],
         seq_len: usize,
@@ -937,30 +1061,25 @@ impl OAROCR {
             return Vec::new();
         }
 
+        let geometry = RecognitionBoxGeometry::from_line_bbox(line_bbox, line_orientation_angle);
+
         // Scale effective column count using standard logic (handles padding to max width)
         let effective_col_num = (seq_len as f32) * (wh_ratio / max_wh_ratio);
         if effective_col_num <= f32::EPSILON {
             return Vec::new();
         }
 
-        // Get the line bounding box coordinates
-        let x_min = line_bbox.x_min();
-        let y_min = line_bbox.y_min();
-        let x_max = line_bbox.x_max();
-        let y_max = line_bbox.y_max();
-        let width = x_max - x_min;
-
         // Calculate cell width (width of each column in the CTC output)
-        let cell_width = width / effective_col_num.max(f32::EPSILON);
+        let cell_width = geometry.recognition_width / effective_col_num.max(f32::EPSILON);
 
         let mut word_boxes = Vec::new();
         let chars: Vec<char> = text.chars().collect();
-        let avg_char_width = width / chars.len().max(1) as f32;
+        let avg_char_width = geometry.recognition_width / chars.len().max(1) as f32;
 
         // Pre-calculate centers for all characters
         let centers: Vec<f32> = col_indices
             .iter()
-            .map(|&idx| x_min + (idx as f32 + 0.5) * cell_width)
+            .map(|&idx| (idx as f32 + 0.5) * cell_width)
             .collect();
 
         for (i, _) in col_indices.iter().enumerate() {
@@ -969,28 +1088,28 @@ impl OAROCR {
 
             if Self::is_cjk(ch) {
                 let half_width = avg_char_width / 2.0;
-                let char_x_min = (center_x - half_width).max(x_min);
-                let char_x_max = (center_x + half_width).min(x_max);
-                let char_box = BoundingBox::from_coords(char_x_min, y_min, char_x_max, y_max);
+                let char_x_min = (center_x - half_width).max(0.0);
+                let char_x_max = (center_x + half_width).min(geometry.recognition_width);
+                let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
                 word_boxes.push(char_box);
             } else {
                 // For non-CJK characters, use the midpoint between adjacent character centers
                 // to determine boundaries. This provides contiguous boxes that adapt to character density.
                 let char_x_min = if i == 0 {
-                    x_min
+                    0.0
                 } else {
                     (centers[i - 1] + center_x) / 2.0
                 }
-                .max(x_min);
+                .max(0.0);
 
                 let char_x_max = if i == col_indices.len() - 1 {
-                    x_max
+                    geometry.recognition_width
                 } else {
                     (center_x + centers[i + 1]) / 2.0
                 }
-                .min(x_max);
+                .min(geometry.recognition_width);
 
-                let char_box = BoundingBox::from_coords(char_x_min, y_min, char_x_max, y_max);
+                let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
                 word_boxes.push(char_box);
             }
         }
@@ -1014,6 +1133,7 @@ impl OAROCR {
     /// A vector of bounding boxes, one for each character/word
     fn char_positions_to_word_boxes(
         line_bbox: &BoundingBox,
+        line_orientation_angle: Option<f32>,
         char_positions: &[f32],
         char_count: usize,
     ) -> Vec<BoundingBox> {
@@ -1021,29 +1141,24 @@ impl OAROCR {
             return Vec::new();
         }
 
-        // Get the line bounding box coordinates
-        let x_min = line_bbox.x_min();
-        let y_min = line_bbox.y_min();
-        let x_max = line_bbox.x_max();
-        let y_max = line_bbox.y_max();
-        let width = x_max - x_min;
+        let geometry = RecognitionBoxGeometry::from_line_bbox(line_bbox, line_orientation_angle);
 
         // Calculate approximate character width
-        let char_width = width / char_count as f32;
+        let char_width = geometry.recognition_width / char_count as f32;
 
         // Create a bounding box for each character based on its position
         let mut word_boxes = Vec::new();
         for &pos in char_positions.iter() {
             // Calculate x position (pos is normalized 0.0-1.0)
-            let char_x_center = x_min + (pos * width);
+            let char_x_center = pos * geometry.recognition_width;
 
             // Estimate character box boundaries
             // Use half character width on each side of the position
-            let char_x_min = (char_x_center - char_width / 2.0).max(x_min);
-            let char_x_max = (char_x_center + char_width / 2.0).min(x_max);
+            let char_x_min = (char_x_center - char_width / 2.0).max(0.0);
+            let char_x_max =
+                (char_x_center + char_width / 2.0).min(geometry.recognition_width);
 
-            // Use the full height of the text line for each character
-            let char_box = BoundingBox::from_coords(char_x_min, y_min, char_x_max, y_max);
+            let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
             word_boxes.push(char_box);
         }
 
@@ -1195,6 +1310,7 @@ mod tests {
 
         let boxes = OAROCR::ctc_word_boxes(
             &line_bbox,
+            None,
             text,
             &col_indices,
             seq_len,
@@ -1214,5 +1330,73 @@ mod tests {
         assert!((boxes[1].x_max() - 60.0).abs() < 1e-5);
         assert!((boxes[2].x_min() - 60.0).abs() < 1e-5);
         assert!((boxes[2].x_max() - 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ctc_word_boxes_project_vertical_crop_along_text_axis() {
+        let line_bbox = BoundingBox::from_coords(10.0, 20.0, 30.0, 120.0);
+        let boxes = OAROCR::ctc_word_boxes(
+            &line_bbox,
+            None,
+            "ABC",
+            &[1, 4, 7],
+            10,
+            5.0,
+            5.0,
+        );
+
+        assert_eq!(boxes.len(), 3);
+        assert!((boxes[0].x_min() - 10.0).abs() < 1e-5);
+        assert!((boxes[0].x_max() - 30.0).abs() < 1e-5);
+        assert!((boxes[0].y_min() - 20.0).abs() < 1e-5);
+        assert!((boxes[0].y_max() - 50.0).abs() < 1e-5);
+        assert!((boxes[1].y_min() - 50.0).abs() < 1e-5);
+        assert!((boxes[1].y_max() - 80.0).abs() < 1e-5);
+        assert!((boxes[2].y_min() - 80.0).abs() < 1e-5);
+        assert!((boxes[2].y_max() - 120.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ctc_word_boxes_use_rounded_crop_size_for_vertical_threshold() {
+        let line_bbox = BoundingBox::from_coords(10.0, 20.0, 110.4, 170.55);
+        let boxes = OAROCR::ctc_word_boxes(
+            &line_bbox,
+            None,
+            "ABC",
+            &[1, 4, 7],
+            10,
+            1.5,
+            1.5,
+        );
+
+        assert_eq!(boxes.len(), 3);
+        assert!((boxes[0].y_min() - 20.0).abs() < 1e-5);
+        assert!((boxes[0].y_max() - 65.16556).abs() < 2e-3);
+        assert!((boxes[1].y_min() - 65.16556).abs() < 2e-3);
+        assert!((boxes[1].y_max() - 110.33112).abs() < 2e-3);
+        assert!((boxes[2].y_min() - 110.33112).abs() < 2e-3);
+        assert!((boxes[2].y_max() - 170.55).abs() < 2e-3);
+    }
+
+    #[test]
+    fn test_ctc_word_boxes_reverse_line_orientation_180() {
+        let line_bbox = BoundingBox::from_coords(0.0, 0.0, 100.0, 20.0);
+        let boxes = OAROCR::ctc_word_boxes(
+            &line_bbox,
+            Some(180.0),
+            "ABC",
+            &[1, 4, 7],
+            10,
+            5.0,
+            5.0,
+        );
+
+        assert_eq!(boxes.len(), 3);
+        assert!((boxes[0].x_min() - 70.0).abs() < 1e-5);
+        assert!((boxes[0].x_max() - 100.0).abs() < 1e-5);
+        assert!((boxes[1].x_min() - 40.0).abs() < 1e-5);
+        assert!((boxes[1].x_max() - 70.0).abs() < 1e-5);
+        assert!((boxes[2].x_min() - 0.0).abs() < 1e-5);
+        assert!((boxes[2].x_max() - 40.0).abs() < 1e-5);
     }
 }
