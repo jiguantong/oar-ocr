@@ -201,7 +201,9 @@ impl OrtInfer {
                             map_directml_performance_preference(*preference),
                         );
                     }
-                    providers.push(dml_provider.build());
+                    // DirectML 配置代表调用方明确要求 GPU。注册失败必须上抛，避免会话
+                    // 静默使用 CPU 后仍被调用方误判为 GPU 已启用。
+                    providers.push(dml_provider.build().error_on_failure());
                 }
                 #[cfg(feature = "coreml")]
                 EP::CoreML {
