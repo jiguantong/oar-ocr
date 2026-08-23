@@ -1,7 +1,10 @@
 use super::*;
+#[cfg(feature = "directml")]
+use crate::core::config::OrtDirectMLPerformancePreference;
+#[cfg(feature = "coreml")]
+use crate::core::config::{OrtCoreMLComputeUnits, OrtCoreMLModelFormat};
 use crate::core::config::{
-    OrtDirectMLPerformancePreference, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
-    OrtSessionConfig,
+    OrtExecutionProvider, OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
@@ -75,7 +78,8 @@ impl OrtInfer {
         for ep in eps {
             match ep {
                 EP::CPU { arena_allocator } => {
-                    let mut cpu_provider = ort::execution_providers::CPUExecutionProvider::default();
+                    let mut cpu_provider =
+                        ort::execution_providers::CPUExecutionProvider::default();
                     if let Some(enable) = arena_allocator {
                         cpu_provider = cpu_provider.with_arena_allocator(*enable);
                     }
@@ -90,7 +94,7 @@ impl OrtInfer {
                     cudnn_conv_use_max_workspace,
                 } => {
                     use ort::execution_providers::{
-                        ArenaExtendStrategy, cuda::ConvAlgorithmSearch,
+                        cuda::ConvAlgorithmSearch, ArenaExtendStrategy,
                     };
                     let mut cuda_provider =
                         ort::execution_providers::CUDAExecutionProvider::default();
@@ -205,15 +209,23 @@ impl OrtInfer {
                 }
                 #[cfg(feature = "coreml")]
                 EP::CoreML {
-                    ane_only,
+                    compute_units,
+                    model_format,
+                    model_cache_dir,
                     subgraphs,
                 } => {
-                    use ort::execution_providers::coreml::ComputeUnits;
                     let mut coreml_provider =
                         ort::execution_providers::CoreMLExecutionProvider::default();
-                    if let Some(true) = ane_only {
+                    if let Some(units) = compute_units {
                         coreml_provider =
-                            coreml_provider.with_compute_units(ComputeUnits::CPUAndNeuralEngine);
+                            coreml_provider.with_compute_units(map_coreml_compute_units(*units));
+                    }
+                    if let Some(format) = model_format {
+                        coreml_provider =
+                            coreml_provider.with_model_format(map_coreml_model_format(*format));
+                    }
+                    if let Some(path) = model_cache_dir {
+                        coreml_provider = coreml_provider.with_model_cache_dir(path);
                     }
                     if let Some(sub) = subgraphs {
                         coreml_provider = coreml_provider.with_subgraphs(*sub);
@@ -283,6 +295,32 @@ impl OrtInfer {
     }
 }
 
+#[cfg(feature = "coreml")]
+fn map_coreml_compute_units(
+    units: OrtCoreMLComputeUnits,
+) -> ort::execution_providers::coreml::ComputeUnits {
+    use ort::execution_providers::coreml::ComputeUnits;
+
+    match units {
+        OrtCoreMLComputeUnits::All => ComputeUnits::All,
+        OrtCoreMLComputeUnits::CpuOnly => ComputeUnits::CPUOnly,
+        OrtCoreMLComputeUnits::CpuAndGpu => ComputeUnits::CPUAndGPU,
+        OrtCoreMLComputeUnits::CpuAndNeuralEngine => ComputeUnits::CPUAndNeuralEngine,
+    }
+}
+
+#[cfg(feature = "coreml")]
+fn map_coreml_model_format(
+    format: OrtCoreMLModelFormat,
+) -> ort::execution_providers::coreml::ModelFormat {
+    use ort::execution_providers::coreml::ModelFormat;
+
+    match format {
+        OrtCoreMLModelFormat::MlProgram => ModelFormat::MLProgram,
+        OrtCoreMLModelFormat::NeuralNetwork => ModelFormat::NeuralNetwork,
+    }
+}
+
 #[cfg(feature = "directml")]
 fn map_directml_performance_preference(
     preference: OrtDirectMLPerformancePreference,
@@ -291,10 +329,34 @@ fn map_directml_performance_preference(
 
     match preference {
         OrtDirectMLPerformancePreference::Default => PerformancePreference::Default,
-        OrtDirectMLPerformancePreference::HighPerformance => {
-            PerformancePreference::HighPerformance
-        }
+        OrtDirectMLPerformancePreference::HighPerformance => PerformancePreference::HighPerformance,
         OrtDirectMLPerformancePreference::MinimumPower => PerformancePreference::MinimumPower,
+    }
+}
+
+#[cfg(all(test, feature = "coreml"))]
+mod coreml_tests {
+    use super::*;
+    use ort::execution_providers::coreml::{ComputeUnits, ModelFormat};
+
+    #[test]
+    fn maps_coreml_options() {
+        assert_eq!(
+            map_coreml_compute_units(OrtCoreMLComputeUnits::All),
+            ComputeUnits::All
+        );
+        assert_eq!(
+            map_coreml_compute_units(OrtCoreMLComputeUnits::CpuAndNeuralEngine),
+            ComputeUnits::CPUAndNeuralEngine
+        );
+        assert_eq!(
+            map_coreml_model_format(OrtCoreMLModelFormat::MlProgram),
+            ModelFormat::MLProgram
+        );
+        assert_eq!(
+            map_coreml_model_format(OrtCoreMLModelFormat::NeuralNetwork),
+            ModelFormat::NeuralNetwork
+        );
     }
 }
 
