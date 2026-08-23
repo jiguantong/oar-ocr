@@ -21,6 +21,19 @@ pub enum OrtGraphOptimizationLevel {
     All,
 }
 
+/// DirectML device selection preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrtDirectMLPerformancePreference {
+    /// Let DirectML and Windows choose the adapter using the system default policy.
+    #[default]
+    Default,
+    /// Prefer the highest-performance compatible adapter.
+    HighPerformance,
+    /// Prefer a lower-power compatible adapter.
+    MinimumPower,
+}
+
 /// Execution providers for ONNX Runtime.
 ///
 /// This enum represents the different execution providers that can be used
@@ -50,8 +63,10 @@ pub enum OrtExecutionProvider {
     },
     /// DirectML execution provider (Windows only)
     DirectML {
-        /// DirectML device ID (default: 0)
+        /// Explicit DirectML device ID. When set, this overrides the performance preference.
         device_id: Option<i32>,
+        /// Adapter selection preference used when `device_id` is not set.
+        performance_preference: Option<OrtDirectMLPerformancePreference>,
     },
     /// OpenVINO execution provider
     OpenVINO {
@@ -280,5 +295,20 @@ mod tests {
             config.get_optimization_level(),
             OrtGraphOptimizationLevel::All
         ));
+    }
+
+    #[test]
+    fn directml_performance_preference_roundtrips_through_json() {
+        let provider = OrtExecutionProvider::DirectML {
+            device_id: None,
+            performance_preference: Some(OrtDirectMLPerformancePreference::HighPerformance),
+        };
+
+        let json = serde_json::to_string(&provider).expect("serialize DirectML provider");
+        let decoded: OrtExecutionProvider =
+            serde_json::from_str(&json).expect("deserialize DirectML provider");
+
+        assert_eq!(decoded, provider);
+        assert!(json.contains("high_performance"));
     }
 }
