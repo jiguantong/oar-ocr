@@ -23,6 +23,8 @@ use oar_ocr_core::processors::{BoundingBox, Point};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const MAX_POOLED_CROPS: usize = 4096;
+
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
 struct OCRPipeline {
@@ -434,6 +436,42 @@ struct CroppedTextRegion {
     image: Arc<image::RgbImage>,
     wh_ratio: f32,
     line_orientation_angle: Option<f32>,
+    line_orientation_confidence: Option<f32>,
+}
+
+/// 已完成文字检测、裁剪和行方向分类的单张图，可直接继续识别。
+/// 不执行文档旋转或文档矫正；需要这些步骤的调用方应继续使用 `predict`。
+pub struct PreparedTextImage {
+    image: Arc<image::RgbImage>,
+    detection_boxes: Vec<BoundingBox>,
+    crops: Vec<CroppedTextRegion>,
+}
+
+/// 行方向分类证据。角度相对于裁剪后的行图，而非原始整页。
+pub struct LineOrientationEvidence<'a> {
+    pub bounding_box: &'a BoundingBox,
+    pub angle: Option<f32>,
+    pub confidence: Option<f32>,
+}
+
+impl PreparedTextImage {
+    pub fn detection_boxes(&self) -> &[BoundingBox] {
+        &self.detection_boxes
+    }
+
+    pub fn line_orientations(&self) -> impl Iterator<Item = LineOrientationEvidence<'_>> {
+        self.crops.iter().map(|crop| LineOrientationEvidence {
+            bounding_box: &crop.bbox,
+            angle: crop.line_orientation_angle,
+            confidence: crop.line_orientation_confidence,
+        })
+    }
+
+    /// 放弃当前准备结果并取回输入图，供调用方按其他方向重新处理。
+    pub fn into_image(self) -> image::RgbImage {
+        let Self { image, .. } = self;
+        Arc::try_unwrap(image).unwrap_or_else(|image| image.as_ref().clone())
+    }
 }
 
 struct RecognitionBoxGeometry {
@@ -573,6 +611,57 @@ impl std::fmt::Debug for CroppedTextRegion {
 }
 
 impl OAROCR {
+    /// 只运行文字检测、裁剪和行方向分类，复用当前模型会话。
+    /// 调用方可据此决定整页方向；继续原图识别时消费返回值，避免重复前处理。
+    pub fn prepare_text_image(
+        &self,
+        image: image::RgbImage,
+    ) -> Result<PreparedTextImage, OCRError> {
+        let image = Arc::new(image);
+        let detection_boxes = self.detect_sorted_text_boxes(&image)?;
+        let mut crops = self.crop_text_regions(&image, &detection_boxes)?;
+        self.classify_line_orientations(&mut crops)?;
+        Ok(PreparedTextImage {
+            image,
+            detection_boxes,
+            crops,
+        })
+    }
+
+    /// 消费已准备好的行图，沿用完整流程的批处理、阅读顺序和字符坐标计算。
+    pub fn recognize_prepared_text(
+        &self,
+        prepared: PreparedTextImage,
+    ) -> Result<crate::oarocr::OAROCRResult, OCRError> {
+        let mut results = vec![vec![None; prepared.detection_boxes.len()]];
+        let mut crops = prepared.crops.into_iter();
+        loop {
+            // 与 predict 使用相同的池边界，避免大图改变宽度分组和字符框计算结果。
+            let batch: Vec<_> = crops
+                .by_ref()
+                .take(MAX_POOLED_CROPS)
+                .map(|crop| (0, crop))
+                .collect();
+            if batch.is_empty() {
+                break;
+            }
+            self.recognize_global(batch, &mut results)?;
+        }
+        Ok(crate::oarocr::OAROCRResult {
+            input_path: Arc::from("image_0"),
+            index: 0,
+            input_img: prepared.image,
+            text_regions: results
+                .pop()
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect(),
+            orientation_angle: None,
+            rectified_img: None,
+        })
+    }
+
     /// Predicts text from images using the configured OCR pipeline.
     ///
     /// This method orchestrates the execution of all configured tasks in the pipeline,
@@ -700,7 +789,6 @@ impl OAROCR {
         // batch runs, so an unbounded pool grows peak memory with the input and can
         // OOM on big multi-page calls. We flush (recognize + scatter) on reaching
         // the cap; it's high enough that typical batches still pool fully.
-        const MAX_POOLED_CROPS: usize = 4096;
         let mut per_image_results: Vec<Vec<Option<crate::oarocr::TextRegion>>> =
             all_detection_boxes
                 .iter()
@@ -846,6 +934,7 @@ impl OAROCR {
                 image: img,
                 wh_ratio,
                 line_orientation_angle: None,
+                line_orientation_confidence: None,
             });
         }
 
@@ -881,6 +970,7 @@ impl OAROCR {
             // Convert class_id to angle (0=0°, 1=180°)
             let angle = (top_class.class_id as f32) * 180.0;
             regions[idx].line_orientation_angle = Some(angle);
+            regions[idx].line_orientation_confidence = Some(top_class.score);
 
             if top_class.class_id == 1 {
                 regions[idx].image =
@@ -1199,6 +1289,21 @@ mod tests {
         assert!(builder.document_orientation_model.is_none());
         assert!(builder.text_line_orientation_model.is_none());
         assert!(builder.document_rectification_model.is_none());
+    }
+
+    #[test]
+    fn prepared_text_image_returns_owned_input_without_copying_pixels() {
+        let image = Arc::new(image::RgbImage::new(32, 24));
+        let pixels = image.as_raw().as_ptr();
+        let prepared = PreparedTextImage {
+            image,
+            detection_boxes: Vec::new(),
+            crops: Vec::new(),
+        };
+
+        let returned = prepared.into_image();
+
+        assert_eq!(returned.as_raw().as_ptr(), pixels);
     }
 
     #[test]
