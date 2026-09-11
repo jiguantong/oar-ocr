@@ -134,7 +134,9 @@ impl OrtInfer {
                     if let Some(enable) = cudnn_conv_use_max_workspace {
                         cuda_provider = cuda_provider.with_conv_max_workspace(*enable);
                     }
-                    providers.push(cuda_provider.build());
+                    // CUDA 注册失败必须上抛，由调用方记录失败并决定是否回退 CPU，
+                    // 避免实际使用 CPU 时仍被误判为 GPU 已启用；不限制正常的算子级 CPU 分配。
+                    providers.push(cuda_provider.build().error_on_failure());
                 }
                 #[cfg(feature = "tensorrt")]
                 EP::TensorRT {
