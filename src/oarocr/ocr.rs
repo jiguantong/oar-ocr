@@ -84,6 +84,7 @@ pub struct OAROCRBuilder {
     // Text type and word box options
     text_type: Option<String>,
     return_word_box: bool,
+    retain_ctc_candidates: bool,
 }
 
 impl OAROCRBuilder {
@@ -121,6 +122,7 @@ impl OAROCRBuilder {
             region_batch_size: None,
             text_type: None,
             return_word_box: false,
+            retain_ctc_candidates: false,
         }
     }
 
@@ -144,6 +146,12 @@ impl OAROCRBuilder {
     /// The configuration should be a JSON value containing model-specific settings.
     pub fn text_detection_config(mut self, config: TextDetectionConfig) -> Self {
         self.text_detection_config = Some(config);
+        self
+    }
+
+    /// 保留稀疏 CTC 候选；默认关闭，不改变现有识别结果。
+    pub fn retain_ctc_candidates(mut self, enable: bool) -> Self {
+        self.retain_ctc_candidates = enable;
         self
     }
 
@@ -368,6 +376,7 @@ impl OAROCRBuilder {
         let char_dict_vec: Vec<String> = char_dict.lines().map(|s| s.to_string()).collect();
 
         let mut recognition_builder = TextRecognitionAdapterBuilder::new()
+            .retain_ctc_candidates(self.retain_ctc_candidates)
             .character_dict(char_dict_vec)
             .return_word_box(self.return_word_box);
 
@@ -1024,7 +1033,7 @@ impl OAROCR {
                 chunk.iter().map(|(_, r)| Arc::clone(&r.image)).collect(),
             );
 
-            let rec = self
+            let mut rec = self
                 .pipeline
                 .text_recognition_adapter
                 .execute(rec_input, None)?;
@@ -1047,6 +1056,31 @@ impl OAROCR {
                 let seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
 
                 let bbox = region.bbox.clone();
+                let recognition_candidates = rec
+                    .ctc_candidates
+                    .get_mut(i)
+                    .filter(|frames| !frames.is_empty())
+                    .map(|frames| {
+                        let geometry = RecognitionBoxGeometry::from_line_bbox(
+                            &bbox,
+                            region.line_orientation_angle,
+                        );
+                        let cell_width = geometry.recognition_width
+                            / (seq_len as f32 * region.wh_ratio / chunk_max_wh_ratio)
+                                .max(f32::EPSILON);
+                        let point = |time: f32| {
+                            let p = geometry.recognition_point_to_image(
+                                (time + 0.5) * cell_width,
+                                geometry.recognition_height / 2.0,
+                            );
+                            [p.x, p.y]
+                        };
+                        Arc::new(oar_ocr_core::domain::text_region::RecognitionCandidates {
+                            frames: std::mem::take(frames),
+                            columns: col_indices.to_vec(),
+                            frame_axis: [point(0.), point(1.)],
+                        })
+                    });
                 let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
                     Some(Self::ctc_word_boxes(
                         &bbox,
@@ -1072,6 +1106,7 @@ impl OAROCR {
                     && region.detection_index < image_results.len()
                 {
                     image_results[region.detection_index] = Some(crate::oarocr::TextRegion {
+                        recognition_candidates,
                         bounding_box: bbox.clone(),
                         dt_poly: Some(bbox.clone()),
                         rec_poly: Some(bbox),
@@ -1093,6 +1128,22 @@ impl OAROCR {
         rot: crate::oarocr::preprocess::OrientationCorrection,
     ) {
         for region in regions {
+            if let Some(evidence) = region.recognition_candidates.as_mut() {
+                let evidence = Arc::make_mut(evidence);
+                let points = evidence
+                    .frame_axis
+                    .iter()
+                    .map(|p| oar_ocr_core::processors::Point { x: p[0], y: p[1] })
+                    .collect();
+                let transformed = BoundingBox { points }.rotate_back_to_original(
+                    rot.angle,
+                    rot.rotated_width,
+                    rot.rotated_height,
+                );
+                for (out, point) in evidence.frame_axis.iter_mut().zip(transformed.points) {
+                    *out = [point.x, point.y];
+                }
+            }
             region.dt_poly = region.dt_poly.take().map(|poly| {
                 poly.rotate_back_to_original(rot.angle, rot.rotated_width, rot.rotated_height)
             });
@@ -1245,8 +1296,7 @@ impl OAROCR {
             // Estimate character box boundaries
             // Use half character width on each side of the position
             let char_x_min = (char_x_center - char_width / 2.0).max(0.0);
-            let char_x_max =
-                (char_x_center + char_width / 2.0).min(geometry.recognition_width);
+            let char_x_max = (char_x_center + char_width / 2.0).min(geometry.recognition_width);
 
             let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
             word_boxes.push(char_box);
@@ -1440,15 +1490,7 @@ mod tests {
     #[test]
     fn test_ctc_word_boxes_project_vertical_crop_along_text_axis() {
         let line_bbox = BoundingBox::from_coords(10.0, 20.0, 30.0, 120.0);
-        let boxes = OAROCR::ctc_word_boxes(
-            &line_bbox,
-            None,
-            "ABC",
-            &[1, 4, 7],
-            10,
-            5.0,
-            5.0,
-        );
+        let boxes = OAROCR::ctc_word_boxes(&line_bbox, None, "ABC", &[1, 4, 7], 10, 5.0, 5.0);
 
         assert_eq!(boxes.len(), 3);
         assert!((boxes[0].x_min() - 10.0).abs() < 1e-5);
@@ -1464,15 +1506,7 @@ mod tests {
     #[test]
     fn test_ctc_word_boxes_use_rounded_crop_size_for_vertical_threshold() {
         let line_bbox = BoundingBox::from_coords(10.0, 20.0, 110.4, 170.55);
-        let boxes = OAROCR::ctc_word_boxes(
-            &line_bbox,
-            None,
-            "ABC",
-            &[1, 4, 7],
-            10,
-            1.5,
-            1.5,
-        );
+        let boxes = OAROCR::ctc_word_boxes(&line_bbox, None, "ABC", &[1, 4, 7], 10, 1.5, 1.5);
 
         assert_eq!(boxes.len(), 3);
         assert!((boxes[0].y_min() - 20.0).abs() < 1e-5);
@@ -1486,15 +1520,8 @@ mod tests {
     #[test]
     fn test_ctc_word_boxes_reverse_line_orientation_180() {
         let line_bbox = BoundingBox::from_coords(0.0, 0.0, 100.0, 20.0);
-        let boxes = OAROCR::ctc_word_boxes(
-            &line_bbox,
-            Some(180.0),
-            "ABC",
-            &[1, 4, 7],
-            10,
-            5.0,
-            5.0,
-        );
+        let boxes =
+            OAROCR::ctc_word_boxes(&line_bbox, Some(180.0), "ABC", &[1, 4, 7], 10, 5.0, 5.0);
 
         assert_eq!(boxes.len(), 3);
         assert!((boxes[0].x_min() - 70.0).abs() < 1e-5);

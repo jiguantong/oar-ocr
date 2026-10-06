@@ -31,6 +31,7 @@ impl Default for TextRecognitionConfig {
 /// Output from text recognition task.
 #[derive(Debug, Clone)]
 pub struct TextRecognitionOutput {
+    pub ctc_candidates: Vec<Vec<crate::models::recognition::crnn::CtcFrame>>,
     /// Recognized text strings
     pub texts: Vec<String>,
     /// Confidence scores for each text
@@ -50,6 +51,7 @@ impl TextRecognitionOutput {
     /// Creates an empty text recognition output.
     pub fn empty() -> Self {
         Self {
+            ctc_candidates: Vec::new(),
             texts: Vec::new(),
             scores: Vec::new(),
             char_positions: Vec::new(),
@@ -61,6 +63,7 @@ impl TextRecognitionOutput {
     /// Creates a text recognition output with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            ctc_candidates: Vec::new(),
             texts: Vec::with_capacity(capacity),
             scores: Vec::with_capacity(capacity),
             char_positions: Vec::with_capacity(capacity),

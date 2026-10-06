@@ -1513,6 +1513,7 @@ impl OARStructure {
                     text_regions[ocr_idx].confidence = Some(score);
                 } else {
                     appended_regions.push(crate::oarocr::TextRegion {
+                        recognition_candidates: None,
                         bounding_box: crop_box.clone(),
                         dt_poly: Some(crop_box.clone()),
                         rec_poly: Some(crop_box),
@@ -1575,6 +1576,7 @@ impl OARStructure {
                 {
                     let crop_box = elem.bbox.clone();
                     text_regions.push(crate::oarocr::TextRegion {
+                        recognition_candidates: None,
                         bounding_box: crop_box.clone(),
                         dt_poly: Some(crop_box.clone()),
                         rec_poly: Some(crop_box),
@@ -1813,6 +1815,7 @@ impl OARStructure {
                         box_coords[3],
                     );
                     new_regions.push(crate::oarocr::TextRegion {
+                        recognition_candidates: None,
                         bounding_box: bbox.clone(),
                         dt_poly: Some(bbox.clone()),
                         rec_poly: Some(bbox),
@@ -2443,6 +2446,7 @@ impl OARStructure {
                     };
                     let bbox = detection_boxes[det_idx].clone();
                     text_regions.push(TextRegion {
+                        recognition_candidates: None,
                         bounding_box: bbox.clone(),
                         dt_poly: Some(bbox.clone()),
                         rec_poly: Some(bbox),
@@ -3164,6 +3168,7 @@ impl OARStructure {
                 };
                 let bbox = state.detection_boxes[det_idx].clone();
                 text_regions.push(TextRegion {
+                    recognition_candidates: None,
                     bounding_box: bbox.clone(),
                     dt_poly: Some(bbox.clone()),
                     rec_poly: Some(bbox),

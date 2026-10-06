@@ -64,24 +64,14 @@ impl ModelAdapter for TextRecognitionAdapter {
         let mut result_col_indices = Vec::with_capacity(model_output.texts.len());
         let mut result_seq_lengths = Vec::with_capacity(model_output.texts.len());
 
-        for (((text, score), positions), (col_indices, seq_len)) in model_output
-            .texts
-            .into_iter()
-            .zip(model_output.scores)
-            .zip(
-                model_output
-                    .char_positions
-                    .into_iter()
-                    .chain(std::iter::repeat(Vec::new())),
-            )
-            .zip(
-                model_output
-                    .char_col_indices
-                    .into_iter()
-                    .zip(model_output.sequence_lengths)
-                    .chain(std::iter::repeat((Vec::new(), 0))),
-            )
-        {
+        // 字符坐标可选，帧数独立存在，不能用 zip 将没有字框的序列长度一起丢弃。
+        let mut positions = model_output.char_positions.into_iter();
+        let mut col_indices = model_output.char_col_indices.into_iter();
+        let mut seq_lengths = model_output.sequence_lengths.into_iter();
+        for (text, score) in model_output.texts.into_iter().zip(model_output.scores) {
+            let positions = positions.next().unwrap_or_default();
+            let col_indices = col_indices.next().unwrap_or_default();
+            let seq_len = seq_lengths.next().unwrap_or(0);
             if score >= effective_config.score_threshold {
                 result_texts.push(text);
                 result_scores.push(score);
@@ -99,6 +89,7 @@ impl ModelAdapter for TextRecognitionAdapter {
         }
 
         Ok(TextRecognitionOutput {
+            ctc_candidates: model_output.ctc_candidates,
             texts: result_texts,
             scores: result_scores,
             char_positions: result_positions,
@@ -136,6 +127,7 @@ impl_adapter_builder! {
         preprocess_config: CRNNPreprocessConfig = CRNNPreprocessConfig::default(),
         character_dict: Option<Vec<String>> = None,
         return_word_box: bool = false,
+        retain_ctc_candidates: bool = false,
         model_name_override: Option<String> = None,
     },
 
@@ -174,6 +166,12 @@ impl_adapter_builder! {
             self
         }
 
+        /// 复用已有识别输出，保留 Top10 与空白帧供候选文本核对。
+        pub fn retain_ctc_candidates(mut self, enable: bool) -> Self {
+            self.retain_ctc_candidates = enable;
+            self
+        }
+
         /// Sets whether to return character positions for word box generation.
         pub fn return_word_box(mut self, enable: bool) -> Self {
             self.return_word_box = enable;
@@ -189,7 +187,7 @@ impl_adapter_builder! {
             })?;
 
         // Build the CRNN model
-        let mut model_builder = CRNNModelBuilder::new().preprocess_config(builder.preprocess_config);
+        let mut model_builder = CRNNModelBuilder::new().preprocess_config(builder.preprocess_config).retain_ctc_candidates(builder.retain_ctc_candidates);
 
         if let Some(character_dict) = builder.character_dict {
             model_builder = model_builder.character_dict(character_dict);

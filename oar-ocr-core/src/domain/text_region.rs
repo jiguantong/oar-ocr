@@ -4,10 +4,20 @@ use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// 候选与原识别共享裁片、旋转、补边及帧编号，帧轴已经映射至输入图片。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecognitionCandidates {
+    pub frames: Vec<crate::models::recognition::crnn::CtcFrame>,
+    pub columns: Vec<usize>,
+    pub frame_axis: [[f32; 2]; 2],
+}
+
 /// A single detected text region: bounding box, recognized text, confidence,
 /// orientation, and optional word-level boxes — grouped to avoid parallel vectors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRegion {
+    #[serde(skip)]
+    pub recognition_candidates: Option<Arc<RecognitionCandidates>>,
     /// The bounding box of the detected text region.
     pub bounding_box: BoundingBox,
     /// Detection polygon (dt_polys in overall OCR).
@@ -46,6 +56,7 @@ impl TextRegion {
     /// The text, confidence, orientation_angle, word_boxes, and label are initially set to None.
     pub fn new(bounding_box: BoundingBox) -> Self {
         Self {
+            recognition_candidates: None,
             bounding_box,
             dt_poly: None,
             rec_poly: None,
@@ -64,6 +75,7 @@ impl TextRegion {
         confidence: Option<f32>,
     ) -> Self {
         Self {
+            recognition_candidates: None,
             bounding_box,
             dt_poly: None,
             rec_poly: None,
@@ -83,6 +95,7 @@ impl TextRegion {
         orientation_angle: Option<f32>,
     ) -> Self {
         Self {
+            recognition_candidates: None,
             bounding_box,
             dt_poly: None,
             rec_poly: None,
