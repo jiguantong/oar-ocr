@@ -7,7 +7,7 @@
 use super::builder_utils::{build_optional_adapter, resolve_model_path, resolve_model_source};
 use oar_ocr_core::core::ModelSource;
 use oar_ocr_core::core::config::OrtSessionConfig;
-use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
+use oar_ocr_core::core::constants::{DEFAULT_MAX_IMG_WIDTH, DEFAULT_REC_IMAGE_SHAPE};
 use oar_ocr_core::core::errors::OCRError;
 use oar_ocr_core::core::traits::OrtConfigurable;
 use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
@@ -637,6 +637,64 @@ impl OAROCR {
         })
     }
 
+    /// 按完整流程相同的裁剪方式取出指定文字行，并按给定行方向旋正（180° 时旋转）。
+    /// 返回顺序与 `lines` 一致；裁剪失败的行为 `None`。供调用方对已识别的行补充识别。
+    ///
+    /// 行框必须与 `image` 同一坐标系，即未经整页方向还原或文档矫正的检测图坐标。
+    /// `predict` 开启整页方向分类或文档矫正时，返回的行框不满足该前提，不能直接传入。
+    pub fn crop_text_lines(
+        &self,
+        image: &Arc<image::RgbImage>,
+        lines: &[(BoundingBox, Option<f32>)],
+    ) -> Result<Vec<Option<image::RgbImage>>, OCRError> {
+        let boxes: Vec<BoundingBox> = lines.iter().map(|(bbox, _)| bbox.clone()).collect();
+        let mut out = vec![None; lines.len()];
+        for region in self.crop_text_regions(image, &boxes)? {
+            // 与 RecognitionBoxGeometry 的 180° 判断保持同一容差，避免行图与坐标映射方向不一致。
+            let rotated_180 = lines[region.detection_index]
+                .1
+                .is_some_and(|angle| (angle - 180.0).abs() < 1.0);
+            let crop = if rotated_180 {
+                image::imageops::rotate180(region.image.as_ref())
+            } else {
+                Arc::unwrap_or_clone(region.image)
+            };
+            out[region.detection_index] = Some(crop);
+        }
+        Ok(out)
+    }
+
+    /// 识别调用方提供的行图，沿用完整流程的批处理及字符框、CTC 帧坐标映射。
+    /// 每张行图都视为铺满对应行框；行图可横向缩放，坐标按行图自身宽高比映射回行框。
+    /// 行框坐标系前提与 [`Self::crop_text_lines`] 相同；结果不做整页方向还原。
+    pub fn recognize_text_lines(
+        &self,
+        lines: Vec<(BoundingBox, Option<f32>, image::RgbImage)>,
+    ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
+        let count = lines.len();
+        let crops: Vec<_> = lines
+            .into_iter()
+            .enumerate()
+            .map(|(detection_index, (bbox, line_orientation_angle, image))| {
+                let wh_ratio = image.width() as f32 / image.height().max(1) as f32;
+                (
+                    0,
+                    CroppedTextRegion {
+                        detection_index,
+                        bbox,
+                        image: Arc::new(image),
+                        wh_ratio,
+                        line_orientation_angle,
+                        line_orientation_confidence: None,
+                    },
+                )
+            })
+            .collect();
+        let mut results = vec![vec![None; count]];
+        self.recognize_global(crops, &mut results)?;
+        Ok(results.pop().unwrap_or_default())
+    }
+
     /// 消费已准备好的行图，沿用完整流程的批处理、阅读顺序和字符坐标计算。
     pub fn recognize_prepared_text(
         &self,
@@ -1014,6 +1072,9 @@ impl OAROCR {
         });
 
         let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
+        // 识别前处理把整批张量宽度限制在 DEFAULT_MAX_IMG_WIDTH，超出的行图会被横向压缩至该宽度。
+        // 坐标换算必须使用同一上限：否则同批其他行的字符框、CTC 帧坐标会按错误比例偏移。
+        let max_rec_ratio = DEFAULT_MAX_IMG_WIDTH as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
         let batch_size = self
             .region_batch_size
             .unwrap_or_else(|| {
@@ -1026,7 +1087,7 @@ impl OAROCR {
         for chunk in crops.chunks(batch_size) {
             let chunk_max_wh_ratio = chunk
                 .iter()
-                .map(|(_, r)| r.wh_ratio)
+                .map(|(_, r)| r.wh_ratio.min(max_rec_ratio))
                 .fold(base_rec_ratio, |acc, r| acc.max(r));
 
             let rec_input = ImageTaskInput::from_arc_images(
@@ -1056,6 +1117,8 @@ impl OAROCR {
                 let seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
 
                 let bbox = region.bbox.clone();
+                // 超限行本身被压缩至整批宽度，在张量中的占比按上限计算。
+                let wh_ratio = region.wh_ratio.min(max_rec_ratio);
                 let recognition_candidates = rec
                     .ctc_candidates
                     .get_mut(i)
@@ -1066,8 +1129,7 @@ impl OAROCR {
                             region.line_orientation_angle,
                         );
                         let cell_width = geometry.recognition_width
-                            / (seq_len as f32 * region.wh_ratio / chunk_max_wh_ratio)
-                                .max(f32::EPSILON);
+                            / (seq_len as f32 * wh_ratio / chunk_max_wh_ratio).max(f32::EPSILON);
                         let point = |time: f32| {
                             let p = geometry.recognition_point_to_image(
                                 (time + 0.5) * cell_width,
@@ -1088,7 +1150,7 @@ impl OAROCR {
                         text,
                         col_indices,
                         seq_len,
-                        region.wh_ratio,
+                        wh_ratio,
                         chunk_max_wh_ratio,
                     ))
                 } else if self.return_word_box && !char_positions.is_empty() {
