@@ -4,12 +4,14 @@ use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// 候选与原识别共享裁片、旋转、补边及帧编号，帧轴已经映射至输入图片。
+/// 候选与原识别共享裁片、旋转、补边及帧编号，帧坐标已经映射至输入图片。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecognitionCandidates {
     pub frames: Vec<crate::models::recognition::crnn::CtcFrame>,
     pub columns: Vec<usize>,
-    pub frame_axis: [[f32; 2]; 2],
+    /// 每一帧中心在输入图片上的位置，与 `frames` 一一对应。行框不是平行四边形时，
+    /// 帧号与图片坐标不成线性关系，不能只用前两帧外推。
+    pub frame_points: Vec<[f32; 2]>,
 }
 
 /// A single detected text region: bounding box, recognized text, confidence,
