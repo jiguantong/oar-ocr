@@ -564,36 +564,37 @@ impl RecognitionBoxGeometry {
         ]
     }
 
-    fn recognition_rect_to_bbox(&self, x_min: f32, x_max: f32) -> BoundingBox {
-        // 字符位置来自识别图的 x 轴；这里按裁剪和行方向旋转的逆变换映射回检测框。
-        BoundingBox::new(vec![
-            self.recognition_point_to_image(x_min, 0.0),
-            self.recognition_point_to_image(x_max, 0.0),
-            self.recognition_point_to_image(x_max, self.recognition_height),
-            self.recognition_point_to_image(x_min, self.recognition_height),
-        ])
-    }
+    /// 字框在垂直于文字方向上的外扩量，以行高为单位。检测框常常比笔画矮 2～3 像素，
+    /// 字框只取行框高度时会露出字的顶部或底部笔画。
+    const CHAR_BOX_CROSS_MARGIN: f32 = 0.1;
 
-    /// 与 `recognition_rect_to_bbox` 相同，但文字方向上允许超出行框，用于行首行尾的汉字：
-    /// 检测框可能没有框全首尾字的笔画。
-    fn recognition_rect_to_bbox_beyond_line(&self, x_min: f32, x_max: f32) -> BoundingBox {
+    /// 识别图 x 轴上的字符区间映射回原图。垂直于文字方向上下各外扩
+    /// `CHAR_BOX_CROSS_MARGIN` 行高，允许超出行框；`beyond_line` 时文字方向上也不截到行框内，
+    /// 用于行首行尾的字。
+    fn recognition_rect_to_bbox(&self, x_min: f32, x_max: f32, beyond_line: bool) -> BoundingBox {
+        let margin = self.recognition_height * Self::CHAR_BOX_CROSS_MARGIN;
+        let (top, bottom) = (-margin, self.recognition_height + margin);
+        let point = |x, y| self.map_recognition_point(x, y, !beyond_line, false);
         BoundingBox::new(vec![
-            self.recognition_point_to_image_unclamped(x_min, 0.0),
-            self.recognition_point_to_image_unclamped(x_max, 0.0),
-            self.recognition_point_to_image_unclamped(x_max, self.recognition_height),
-            self.recognition_point_to_image_unclamped(x_min, self.recognition_height),
+            point(x_min, top),
+            point(x_max, top),
+            point(x_max, bottom),
+            point(x_min, bottom),
         ])
     }
 
     fn recognition_point_to_image(&self, x: f32, y: f32) -> Point {
-        self.map_recognition_point(x, y, true)
+        self.map_recognition_point(x, y, true, true)
     }
 
-    fn recognition_point_to_image_unclamped(&self, x: f32, y: f32) -> Point {
-        self.map_recognition_point(x, y, false)
-    }
-
-    fn map_recognition_point(&self, x: f32, y: f32, clamp_text_axis: bool) -> Point {
+    /// `clamp_text_axis`、`clamp_cross_axis` 分别控制文字方向与垂直方向是否截在行框内。
+    fn map_recognition_point(
+        &self,
+        x: f32,
+        y: f32,
+        clamp_text_axis: bool,
+        clamp_cross_axis: bool,
+    ) -> Point {
         let (mut rx, mut ry) = (x, y);
         if self.line_rotated_180 {
             rx = self.recognition_width - rx;
@@ -608,11 +609,16 @@ impl RecognitionBoxGeometry {
 
         let mut u = crop_x / self.crop_width;
         let mut v = crop_y / self.crop_height;
-        // 文字方向为识别图的 x 轴，竖排裁剪时对应原图的 v。
-        if clamp_text_axis || self.rotated_vertical_crop {
+        // 文字方向为识别图的 x 轴，竖排裁剪时对应裁剪图的 v，垂直方向对应 u。
+        let (clamp_u, clamp_v) = if self.rotated_vertical_crop {
+            (clamp_cross_axis, clamp_text_axis)
+        } else {
+            (clamp_text_axis, clamp_cross_axis)
+        };
+        if clamp_u {
             u = u.clamp(0.0, 1.0);
         }
-        if clamp_text_axis || !self.rotated_vertical_crop {
+        if clamp_v {
             v = v.clamp(0.0, 1.0);
         }
 
@@ -1371,11 +1377,7 @@ impl OAROCR {
                 } else {
                     right.min(geometry.recognition_width)
                 };
-                let char_box = if first || last {
-                    geometry.recognition_rect_to_bbox_beyond_line(left, right)
-                } else {
-                    geometry.recognition_rect_to_bbox(left, right)
-                };
+                let char_box = geometry.recognition_rect_to_bbox(left, right, first || last);
                 word_boxes.push(char_box);
             } else {
                 // For non-CJK characters, use the midpoint between adjacent character centers
@@ -1394,7 +1396,7 @@ impl OAROCR {
                 }
                 .min(geometry.recognition_width);
 
-                let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
+                let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max, false);
                 word_boxes.push(char_box);
             }
         }
@@ -1442,7 +1444,7 @@ impl OAROCR {
             let char_x_min = (char_x_center - char_width / 2.0).max(0.0);
             let char_x_max = (char_x_center + char_width / 2.0).min(geometry.recognition_width);
 
-            let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max);
+            let char_box = geometry.recognition_rect_to_bbox(char_x_min, char_x_max, false);
             word_boxes.push(char_box);
         }
 
@@ -1703,28 +1705,32 @@ mod tests {
 
     #[test]
     fn test_ctc_word_boxes_line_edge_cjk_extends_beyond_line_only_along_text() {
-        // 横排：首尾汉字中心贴近行框两端，字框沿文字方向超出行框，高度仍在行框内。
+        // 横排：首尾汉字中心贴近行框两端，字框沿文字方向超出行框；高度只按固定比例上下外扩。
         let line_bbox = BoundingBox::from_coords(0.0, 0.0, 100.0, 20.0);
         let boxes = OAROCR::ctc_word_boxes(&line_bbox, None, "甲乙丙", &[0, 5, 19], 20, 5.0, 5.0);
         // 字距上限为行高 20，不足整行平均宽 100/3，半宽取 1.2 * 100/3 / 2 = 20。
         assert!((boxes[0].x_min() + 17.5).abs() < 1e-3, "{:?}", boxes[0]);
         assert!((boxes[2].x_max() - 117.5).abs() < 1e-3, "{:?}", boxes[2]);
         assert!((boxes[1].x_min() - 7.5).abs() < 1e-3 && (boxes[1].x_max() - 47.5).abs() < 1e-3);
+        // 行高 20，上下各外扩 10%。
         for b in &boxes {
-            assert!(b.y_min() >= -1e-3 && b.y_max() <= 20.0 + 1e-3, "{b:?}");
+            assert!(
+                (b.y_min() + 2.0).abs() < 1e-3 && (b.y_max() - 22.0).abs() < 1e-3,
+                "{b:?}"
+            );
         }
     }
 
     #[test]
     fn test_ctc_word_boxes_vertical_and_180_edges_extend_along_text_axis() {
-        // 竖排裁剪：文字方向为原图 y 轴，首尾汉字沿 y 超出，x 仍在行框内。
+        // 竖排裁剪：文字方向为原图 y 轴，首尾汉字沿 y 超出；x 方向为垂直方向，只按行宽 20 的 10% 外扩。
         let vertical = BoundingBox::from_coords(10.0, 20.0, 30.0, 120.0);
         let boxes = OAROCR::ctc_word_boxes(&vertical, None, "甲乙", &[0, 9], 10, 5.0, 5.0);
         assert!((boxes[0].y_min() + 5.0).abs() < 1e-3, "{:?}", boxes[0]);
         assert!((boxes[1].y_max() - 145.0).abs() < 1e-3, "{:?}", boxes[1]);
         for b in &boxes {
             assert!(
-                b.x_min() >= 10.0 - 1e-3 && b.x_max() <= 30.0 + 1e-3,
+                (b.x_min() - 8.0).abs() < 1e-3 && (b.x_max() - 32.0).abs() < 1e-3,
                 "{b:?}"
             );
         }
@@ -1734,7 +1740,10 @@ mod tests {
         assert!((boxes[0].x_max() - 127.5).abs() < 1e-3, "{:?}", boxes[0]);
         assert!((boxes[1].x_min() + 27.5).abs() < 1e-3, "{:?}", boxes[1]);
         for b in &boxes {
-            assert!(b.y_min() >= -1e-3 && b.y_max() <= 20.0 + 1e-3, "{b:?}");
+            assert!(
+                (b.y_min() + 2.0).abs() < 1e-3 && (b.y_max() - 22.0).abs() < 1e-3,
+                "{b:?}"
+            );
         }
     }
 
@@ -1754,8 +1763,9 @@ mod tests {
         let boxes = OAROCR::ctc_word_boxes(&line_bbox, None, "ABC", &[1, 4, 7], 10, 5.0, 5.0);
 
         assert_eq!(boxes.len(), 3);
-        assert!((boxes[0].x_min() - 10.0).abs() < 1e-5);
-        assert!((boxes[0].x_max() - 30.0).abs() < 1e-5);
+        // 垂直于文字方向（原图 x）上下各外扩行宽 20 的 10%。
+        assert!((boxes[0].x_min() - 8.0).abs() < 1e-5);
+        assert!((boxes[0].x_max() - 32.0).abs() < 1e-5);
         assert!((boxes[0].y_min() - 20.0).abs() < 1e-5);
         assert!((boxes[0].y_max() - 50.0).abs() < 1e-5);
         assert!((boxes[1].y_min() - 50.0).abs() < 1e-5);
