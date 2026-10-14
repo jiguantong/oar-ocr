@@ -9,9 +9,79 @@ use crate::processors::{CTCLabelDecode, OCRResize};
 use image::RgbImage;
 use rayon::prelude::*;
 
+/// 每帧只保留空白和十个非空候选，避免持有完整的大词表输出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CtcFrame {
+    pub blank: f32,
+    pub symbols: [char; 10],
+    pub probabilities: [f32; 10],
+}
+
+pub fn extract_ctc_candidates<S>(
+    predictions: &ndarray::ArrayBase<S, ndarray::Ix3>,
+    vocabulary: &[char],
+) -> Vec<Vec<CtcFrame>>
+where
+    S: ndarray::Data<Elem = f32> + Sync,
+{
+    (0..predictions.shape()[0])
+        .into_par_iter()
+        .map(|index| {
+            let image = predictions.index_axis(ndarray::Axis(0), index);
+            image
+                .axis_iter(ndarray::Axis(0))
+                .map(|row| {
+                    let mut frame = CtcFrame {
+                        blank: row[0],
+                        symbols: ['\0'; 10],
+                        probabilities: [0.; 10],
+                    };
+                    for (id, &p) in row.iter().enumerate().skip(1) {
+                        if p <= 0.0 || p < frame.probabilities[9] || !p.is_finite() {
+                            continue;
+                        }
+                        let Some(&symbol) = vocabulary.get(id) else {
+                            continue;
+                        };
+                        let mut place = 9;
+                        while place > 0 && p >= frame.probabilities[place - 1] {
+                            frame.probabilities[place] = frame.probabilities[place - 1];
+                            frame.symbols[place] = frame.symbols[place - 1];
+                            place -= 1;
+                        }
+                        frame.probabilities[place] = p;
+                        frame.symbols[place] = symbol;
+                    }
+                    frame
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn top_ten_preserves_blank_and_the_greedy_tie_winner() {
+        let vocabulary: Vec<_> = "\0甲乙丙丁戊己庚辛壬癸子丑寅".chars().collect();
+        let tensor =
+            ndarray::Array3::from_shape_vec((1, 1, vocabulary.len()), vec![0.05; vocabulary.len()])
+                .unwrap();
+        let before = tensor.clone();
+        let rows = extract_ctc_candidates(&tensor, &vocabulary);
+        let frame = &rows[0][0];
+        assert_eq!(frame.blank, 0.05);
+        assert!(frame.symbols.contains(vocabulary.last().unwrap()));
+        assert_eq!(tensor, before);
+    }
+}
+
 /// CRNN model output containing recognized text and confidence scores.
 #[derive(Debug, Clone)]
 pub struct CRNNModelOutput {
+    pub ctc_candidates: Vec<Vec<CtcFrame>>,
     /// Recognized text strings for each image in the batch
     pub texts: Vec<String>,
     /// Confidence scores for each recognized text
@@ -37,6 +107,7 @@ pub struct CRNNModel {
     resizer: OCRResize,
     /// CTC decoder for postprocessing
     decoder: CTCLabelDecode,
+    retain_ctc_candidates: bool,
 }
 
 impl CRNNModel {
@@ -46,6 +117,7 @@ impl CRNNModel {
             inference,
             resizer,
             decoder,
+            retain_ctc_candidates: false,
         }
     }
 
@@ -185,6 +257,7 @@ impl CRNNModel {
             let (texts, scores, char_positions, char_col_indices, sequence_lengths) =
                 self.decoder.apply_with_positions(predictions);
             CRNNModelOutput {
+                ctc_candidates: self.candidates(predictions),
                 texts,
                 scores,
                 char_positions,
@@ -195,13 +268,25 @@ impl CRNNModel {
             // Decode CTC predictions without positions
             let (texts, scores) = self.decoder.apply(predictions);
             CRNNModelOutput {
+                ctc_candidates: self.candidates(predictions),
                 texts,
                 scores,
                 char_positions: Vec::new(),
                 char_col_indices: Vec::new(),
-                sequence_lengths: Vec::new(),
+                // 帧数来自模型输出，与是否返回字框无关，候选帧轴也依赖此信息。
+                sequence_lengths: vec![predictions.shape()[1]; predictions.shape()[0]],
             }
         }
+    }
+
+    fn candidates<S>(&self, predictions: &ndarray::ArrayBase<S, ndarray::Ix3>) -> Vec<Vec<CtcFrame>>
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
+        if !self.retain_ctc_candidates {
+            return Vec::new();
+        }
+        extract_ctc_candidates(predictions, self.decoder.get_character_list())
     }
 
     /// Runs the complete forward pass: preprocess -> infer -> postprocess.
@@ -285,6 +370,7 @@ pub struct CRNNModelBuilder {
     preprocess_config: CRNNPreprocessConfig,
     /// Character dictionary
     character_dict: Option<Vec<String>>,
+    retain_ctc_candidates: bool,
     /// ONNX Runtime session configuration
     ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
@@ -295,6 +381,7 @@ impl CRNNModelBuilder {
         Self {
             preprocess_config: CRNNPreprocessConfig::default(),
             character_dict: None,
+            retain_ctc_candidates: false,
             ort_config: None,
         }
     }
@@ -314,6 +401,12 @@ impl CRNNModelBuilder {
     /// Sets the character dictionary.
     pub fn character_dict(mut self, character_dict: Vec<String>) -> Self {
         self.character_dict = Some(character_dict);
+        self
+    }
+
+    /// 从本次推理输出保留稀疏候选，不重新运行识别模型。
+    pub fn retain_ctc_candidates(mut self, enable: bool) -> Self {
+        self.retain_ctc_candidates = enable;
         self
     }
 
@@ -356,7 +449,9 @@ impl CRNNModelBuilder {
             CTCLabelDecode::new(None, true)
         };
 
-        Ok(CRNNModel::new(inference, resizer, decoder))
+        let mut model = CRNNModel::new(inference, resizer, decoder);
+        model.retain_ctc_candidates = self.retain_ctc_candidates;
+        Ok(model)
     }
 }
 

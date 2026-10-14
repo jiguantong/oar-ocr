@@ -2086,6 +2086,7 @@ mod tests {
 
     fn make_region(bbox: BoundingBox, text: &str) -> TextRegion {
         TextRegion {
+            recognition_candidates: None,
             bounding_box: bbox.clone(),
             dt_poly: Some(bbox.clone()),
             rec_poly: Some(bbox),
@@ -2139,6 +2140,7 @@ mod tests {
         let b1 = BoundingBox::from_coords(0.0, 0.0, 10.0, 10.0);
         let b2 = BoundingBox::from_coords(12.0, 1.0, 20.0, 11.0);
         let r1 = TextRegion {
+            recognition_candidates: None,
             bounding_box: b1.clone(),
             dt_poly: Some(b1.clone()),
             rec_poly: Some(b1),
@@ -2149,6 +2151,7 @@ mod tests {
             label: None,
         };
         let r2 = TextRegion {
+            recognition_candidates: None,
             bounding_box: b2.clone(),
             dt_poly: Some(b2.clone()),
             rec_poly: Some(b2),

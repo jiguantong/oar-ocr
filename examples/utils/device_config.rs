@@ -75,7 +75,9 @@ pub fn parse_device_config(
                     cudnn_conv_algo_search: None,
                     cudnn_conv_use_max_workspace: None,
                 },
-                OrtExecutionProvider::CPU, // Fallback to CPU
+                OrtExecutionProvider::CPU {
+                    arena_allocator: None,
+                }, // Fallback to CPU
             ]);
 
             return Ok(Some(config));

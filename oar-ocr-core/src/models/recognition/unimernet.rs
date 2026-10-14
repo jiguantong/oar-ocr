@@ -375,7 +375,9 @@ mod tests {
                 cudnn_conv_algo_search: None,
                 cudnn_conv_use_max_workspace: None,
             },
-            OrtExecutionProvider::CPU,
+            OrtExecutionProvider::CPU {
+                arena_allocator: None,
+            },
         ]);
 
         let configured = UniMERNetModelBuilder::configure_unimernet_ort_for_cuda(config);

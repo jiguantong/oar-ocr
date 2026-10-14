@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::config::{
-    OrtExecutionProvider, OrtGraphOptimizationLevel as OG, OrtSessionConfig,
+    OrtDirectMLPerformancePreference, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
+    OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
@@ -73,9 +74,12 @@ impl OrtInfer {
 
         for ep in eps {
             match ep {
-                EP::CPU => {
-                    providers
-                        .push(ort::execution_providers::CPUExecutionProvider::default().build());
+                EP::CPU { arena_allocator } => {
+                    let mut cpu_provider = ort::execution_providers::CPUExecutionProvider::default();
+                    if let Some(enable) = arena_allocator {
+                        cpu_provider = cpu_provider.with_arena_allocator(*enable);
+                    }
+                    providers.push(cpu_provider.build());
                 }
                 #[cfg(feature = "cuda")]
                 EP::CUDA {
@@ -130,7 +134,9 @@ impl OrtInfer {
                     if let Some(enable) = cudnn_conv_use_max_workspace {
                         cuda_provider = cuda_provider.with_conv_max_workspace(*enable);
                     }
-                    providers.push(cuda_provider.build());
+                    // CUDA 注册失败必须上抛，由调用方记录失败并决定是否回退 CPU，
+                    // 避免实际使用 CPU 时仍被误判为 GPU 已启用；不限制正常的算子级 CPU 分配。
+                    providers.push(cuda_provider.build().error_on_failure());
                 }
                 #[cfg(feature = "tensorrt")]
                 EP::TensorRT {
@@ -184,13 +190,22 @@ impl OrtInfer {
                     providers.push(trt_provider.build());
                 }
                 #[cfg(feature = "directml")]
-                EP::DirectML { device_id } => {
+                EP::DirectML {
+                    device_id,
+                    performance_preference,
+                } => {
                     let mut dml_provider =
                         ort::execution_providers::DirectMLExecutionProvider::default();
                     if let Some(id) = device_id {
                         dml_provider = dml_provider.with_device_id(*id);
+                    } else if let Some(preference) = performance_preference {
+                        dml_provider = dml_provider.with_performance_preference(
+                            map_directml_performance_preference(*preference),
+                        );
                     }
-                    providers.push(dml_provider.build());
+                    // DirectML 配置代表调用方明确要求 GPU。注册失败必须上抛，避免会话
+                    // 静默使用 CPU 后仍被调用方误判为 GPU 已启用。
+                    providers.push(dml_provider.build().error_on_failure());
                 }
                 #[cfg(feature = "coreml")]
                 EP::CoreML {
@@ -269,5 +284,42 @@ impl OrtInfer {
         }
 
         Ok(providers)
+    }
+}
+
+#[cfg(feature = "directml")]
+fn map_directml_performance_preference(
+    preference: OrtDirectMLPerformancePreference,
+) -> ort::execution_providers::directml::PerformancePreference {
+    use ort::execution_providers::directml::PerformancePreference;
+
+    match preference {
+        OrtDirectMLPerformancePreference::Default => PerformancePreference::Default,
+        OrtDirectMLPerformancePreference::HighPerformance => {
+            PerformancePreference::HighPerformance
+        }
+        OrtDirectMLPerformancePreference::MinimumPower => PerformancePreference::MinimumPower,
+    }
+}
+
+#[cfg(all(test, feature = "directml"))]
+mod directml_tests {
+    use super::*;
+    use ort::execution_providers::directml::PerformancePreference;
+
+    #[test]
+    fn maps_directml_performance_preferences() {
+        assert_eq!(
+            map_directml_performance_preference(OrtDirectMLPerformancePreference::Default),
+            PerformancePreference::Default
+        );
+        assert_eq!(
+            map_directml_performance_preference(OrtDirectMLPerformancePreference::HighPerformance),
+            PerformancePreference::HighPerformance
+        );
+        assert_eq!(
+            map_directml_performance_preference(OrtDirectMLPerformancePreference::MinimumPower),
+            PerformancePreference::MinimumPower
+        );
     }
 }

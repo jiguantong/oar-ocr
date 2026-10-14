@@ -27,6 +27,12 @@ With auto-download of model files from ModelScope:
 cargo add oar-ocr --features auto-download
 ```
 
+Default features are `download-binaries` and `simd`. `download-binaries`
+downloads ONNX Runtime binaries during build, but it does not copy ONNX Runtime
+dynamic libraries into Cargo build outputs. Enable `copy-dylibs` explicitly if
+you want Cargo build outputs to receive those libraries, or enable
+`load-dynamic` and provide the ONNX Runtime library path at runtime.
+
 Bare file names passed to the builders are then fetched from [ModelScope](https://www.modelscope.cn/models/greatv/oar-ocr) into `$OAR_HOME` (default `~/.oar`) and verified against their expected SHA-256. See [docs/models.md](docs/models.md#auto-download-via-the-auto-download-feature) for the exact path resolution rules.
 
 Everywhere a builder accepts a model path it also accepts raw ONNX bytes (e.g. `include_bytes!`), so models can be embedded into a single binary — see [Loading Models from Memory](docs/usage.md#loading-models-from-memory).

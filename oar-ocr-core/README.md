@@ -30,8 +30,11 @@ cargo add oar-ocr-core
 | `coreml` | Enable Core ML execution provider (macOS/iOS) |
 | `openvino` | Enable Intel OpenVINO execution provider |
 | `webgpu` | Enable WebGPU execution provider |
-| `visualization` | Enable drawing utilities for debugging |
 | `download-binaries` | Automatically download ONNX Runtime binaries (default) |
+| `load-dynamic` | Load ONNX Runtime dynamically at runtime |
+| `copy-dylibs` | Copy ONNX Runtime dynamic libraries into Cargo build outputs |
+| `auto-download` | Auto-download registered OCR model files from ModelScope |
+| `simd` | Enable SIMD acceleration for hot CPU pre/post-processing kernels (default) |
 
 ## Quick Start
 
